@@ -42,6 +42,8 @@ CANONICAL_STAGE_ARTIFACTS = {
 # Additional artifacts that may be produced alongside canonical ones.
 # These are not stage-defining but are required by governance contracts.
 SUPPLEMENTARY_ARTIFACTS = {
+    "claim_ledger",         # Claim-to-evidence record carried from research through approval
+    "editorial_package",    # Versioned pre-production scope presented at Editorial Approval
     "source_media_review",  # Required before first planning stage when user media exists
     "final_review",         # Required by compose stage before presenting to user
     "video_analysis_brief", # Reference-video grounding artifact carried alongside stages

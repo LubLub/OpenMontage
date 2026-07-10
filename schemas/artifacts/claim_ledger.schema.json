@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/claim_ledger",
+  "title": "Claim Ledger",
+  "description": "Episode claim-to-evidence record used to establish a fact-checked script.",
+  "type": "object",
+  "required": [
+    "version",
+    "ledger_id",
+    "ledger_version",
+    "project_id",
+    "evidence_policy",
+    "claims"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "ledger_id": { "type": "string", "minLength": 1 },
+    "ledger_version": { "type": "integer", "minimum": 1 },
+    "project_id": { "type": "string", "minLength": 1 },
+    "evidence_policy": {
+      "type": "object",
+      "required": ["routine_authoritative_sources", "high_risk_authoritative_sources"],
+      "properties": {
+        "routine_authoritative_sources": { "type": "integer", "const": 1 },
+        "high_risk_authoritative_sources": { "type": "integer", "const": 2 }
+      },
+      "additionalProperties": false
+    },
+    "claims": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/claim" }
+    }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "required": [
+        "source_id",
+        "title",
+        "url",
+        "publisher",
+        "source_class",
+        "authority_status",
+        "independence_group"
+      ],
+      "properties": {
+        "source_id": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "format": "uri" },
+        "publisher": { "type": "string", "minLength": 1 },
+        "source_class": {
+          "type": "string",
+          "enum": ["primary", "official", "peer_reviewed", "reputable_secondary", "expert"]
+        },
+        "authority_status": { "type": "string", "const": "authoritative" },
+        "independence_group": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "narration_ref": {
+      "type": "object",
+      "required": ["section_id", "narration_excerpt", "start_char", "end_char"],
+      "properties": {
+        "section_id": { "type": "string", "minLength": 1 },
+        "narration_excerpt": { "type": "string", "minLength": 1 },
+        "start_char": { "type": "integer", "minimum": 0 },
+        "end_char": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "claim": {
+      "type": "object",
+      "required": [
+        "claim_id",
+        "claim_text",
+        "classification",
+        "risk_reasons",
+        "evidence_requirement",
+        "evidence_status",
+        "sources",
+        "confidence",
+        "disposition",
+        "narration_refs"
+      ],
+      "properties": {
+        "claim_id": { "type": "string", "minLength": 1 },
+        "claim_text": { "type": "string", "minLength": 1 },
+        "classification": { "type": "string", "enum": ["routine", "high_risk"] },
+        "risk_reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["disputed", "surprising", "numerical", "allegation_related", "thesis_critical"]
+          },
+          "uniqueItems": true
+        },
+        "evidence_requirement": {
+          "type": "string",
+          "enum": ["one_authoritative", "two_independent_authoritative"]
+        },
+        "evidence_status": {
+          "type": "string",
+          "enum": ["sufficient", "insufficient", "disputed"]
+        },
+        "sources": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/source" }
+        },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low"] },
+        "disposition": {
+          "type": "string",
+          "enum": ["supported", "framed_uncertain", "removed"]
+        },
+        "narration_refs": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/narration_ref" }
+        },
+        "uncertainty_language": { "type": "string", "minLength": 1 },
+        "removal_reason": { "type": "string", "minLength": 1 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "classification": { "const": "routine" } }, "required": ["classification"] },
+          "then": {
+            "properties": {
+              "evidence_requirement": { "const": "one_authoritative" },
+              "risk_reasons": { "maxItems": 0 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "classification": { "const": "high_risk" } }, "required": ["classification"] },
+          "then": {
+            "properties": {
+              "evidence_requirement": { "const": "two_independent_authoritative" },
+              "risk_reasons": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "disposition": { "const": "supported" } }, "required": ["disposition"] },
+          "then": {
+            "properties": {
+              "evidence_status": { "const": "sufficient" },
+              "narration_refs": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": { "const": "routine" },
+              "disposition": { "const": "supported" }
+            },
+            "required": ["classification", "disposition"]
+          },
+          "then": { "properties": { "sources": { "minItems": 1 } } }
+        },
+        {
+          "if": {
+            "properties": {
+              "classification": { "const": "high_risk" },
+              "disposition": { "const": "supported" }
+            },
+            "required": ["classification", "disposition"]
+          },
+          "then": { "properties": { "sources": { "minItems": 2 } } }
+        },
+        {
+          "if": { "properties": { "disposition": { "const": "framed_uncertain" } }, "required": ["disposition"] },
+          "then": {
+            "required": ["uncertainty_language"],
+            "properties": {
+              "evidence_status": { "enum": ["insufficient", "disputed"] },
+              "narration_refs": { "minItems": 1 }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "disposition": { "const": "removed" } }, "required": ["disposition"] },
+          "then": {
+            "required": ["removal_reason"],
+            "properties": {
+              "evidence_status": { "enum": ["insufficient", "disputed"] },
+              "narration_refs": { "maxItems": 0 }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

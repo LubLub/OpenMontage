@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/editorial_package",
+  "title": "Editorial Package",
+  "description": "Versioned approval scope binding the complete fact-checked pre-production package.",
+  "type": "object",
+  "required": [
+    "version",
+    "package_id",
+    "package_version",
+    "content_hash",
+    "episode_thesis",
+    "fact_checked_script",
+    "claim_ledger",
+    "shotlist",
+    "provider_plan",
+    "expected_cost"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "package_id": { "type": "string", "minLength": 1 },
+    "package_version": { "type": "integer", "minimum": 1 },
+    "content_hash": { "$ref": "#/$defs/content_hash" },
+    "episode_thesis": { "type": "string", "minLength": 1 },
+    "fact_checked_script": {
+      "allOf": [
+        { "$ref": "#/$defs/artifact_descriptor" },
+        {
+          "properties": { "artifact_name": { "const": "script" } },
+          "not": { "required": ["ledger_version"] }
+        }
+      ]
+    },
+    "claim_ledger": {
+      "allOf": [
+        { "$ref": "#/$defs/artifact_descriptor" },
+        {
+          "required": ["ledger_version"],
+          "properties": {
+            "artifact_name": { "const": "claim_ledger" },
+            "ledger_version": { "type": "integer", "minimum": 1 }
+          }
+        }
+      ]
+    },
+    "shotlist": {
+      "allOf": [
+        { "$ref": "#/$defs/artifact_descriptor" },
+        {
+          "properties": { "artifact_name": { "const": "scene_plan" } },
+          "not": { "required": ["ledger_version"] }
+        }
+      ]
+    },
+    "provider_plan": {
+      "allOf": [
+        { "$ref": "#/$defs/artifact_descriptor" },
+        {
+          "properties": { "artifact_name": { "const": "proposal_packet" } },
+          "not": { "required": ["ledger_version"] }
+        }
+      ]
+    },
+    "expected_cost": {
+      "type": "object",
+      "required": ["currency", "amount"],
+      "properties": {
+        "currency": { "type": "string", "const": "USD" },
+        "amount": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "content_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "artifact_descriptor": {
+      "type": "object",
+      "required": ["artifact_name", "artifact_version", "content_hash"],
+      "properties": {
+        "artifact_name": { "type": "string", "minLength": 1 },
+        "artifact_version": { "type": "string", "minLength": 1 },
+        "content_hash": { "$ref": "#/$defs/content_hash" },
+        "ledger_version": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

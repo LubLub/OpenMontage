@@ -51,15 +51,16 @@ metadata:
 stages:
   - name: research
     skill: pipelines/generative-documentary/research-director
-    produces: [research_brief]
+    produces: [research_brief, claim_ledger]
     tools_available: []
     checkpoint_required: true
     human_approval_default: false
     review_focus:
       - Research sharpens one episode thesis rather than surveying a topic
-      - Sources are explicit and usable by later evidence-policy work
+      - Every candidate narration claim has an explicit evidence requirement
     success_criteria:
       - Schema-valid research_brief
+      - Schema-valid claim_ledger with authoritative sources
 
   - name: proposal
     skill: pipelines/generative-documentary/proposal-director
@@ -77,35 +78,38 @@ stages:
 
   - name: script
     skill: pipelines/generative-documentary/script-director
-    required_artifacts_in: [research_brief, proposal_packet]
-    produces: [script]
+    required_artifacts_in: [research_brief, proposal_packet, claim_ledger]
+    produces: [script, claim_ledger]
     tools_available: []
     checkpoint_required: true
     human_approval_default: false
     review_focus:
       - Script sections contain spoken narration only
-      - Full claim-to-evidence traceability is deferred to the Editorial Package milestone
+      - Every externally verifiable statement maps to a Claim Ledger disposition
     success_criteria:
       - Schema-valid script
+      - Schema-valid Claim Ledger for the final narration
       - No visual directions appear in narration text
 
   - name: scene_plan
     skill: pipelines/generative-documentary/scene-director
-    required_artifacts_in: [research_brief, proposal_packet, script]
-    produces: [scene_plan]
+    required_artifacts_in: [research_brief, proposal_packet, script, claim_ledger]
+    produces: [scene_plan, editorial_package]
     tools_available: []
     checkpoint_required: true
     human_approval_default: true
     review_focus:
       - Shotlist is separate from narration and covers the complete runtime
+      - Editorial Package binds the thesis, script, ledger, shotlist, provider plan, and cost
       - Minimal fixture origin metadata is explicit; full provenance enforcement is deferred
     success_criteria:
       - Schema-valid scene_plan
-      - Editorial Approval gate presents the current pre-production artifacts
+      - Schema-valid, versioned editorial_package
+      - Editorial Approval gate presents the exact Editorial Package
 
   - name: assets
     skill: pipelines/generative-documentary/asset-director
-    required_artifacts_in: [proposal_packet, script, scene_plan]
+    required_artifacts_in: [proposal_packet, script, scene_plan, editorial_package]
     produces: [asset_manifest]
     required_tools: [tts_selector, image_selector]
     optional_tools: [video_selector, music_gen]
