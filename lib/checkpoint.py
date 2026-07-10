@@ -45,6 +45,7 @@ SUPPLEMENTARY_ARTIFACTS = {
     "source_media_review",  # Required before first planning stage when user media exists
     "final_review",         # Required by compose stage before presenting to user
     "video_analysis_brief", # Reference-video grounding artifact carried alongside stages
+    "release_package",      # Deterministic offline package presented at the publish gate
 }
 
 
@@ -423,7 +424,9 @@ def write_checkpoint(
     # reference back into relevant artifacts so downstream consumers can find it.
     if "decision_log" in artifacts and isinstance(artifacts["decision_log"], dict):
         _merge_decision_log(pipeline_dir, project_id, artifacts["decision_log"])
-        log_ref = str(_decision_log_path(pipeline_dir, project_id))
+        # Artifact references are project-relative so checkpoints remain portable
+        # across worktrees, project roots, and deterministic replay runs.
+        log_ref = "decision_log.json"
 
         # Write decision_log_ref into proposal_packet and render_report
         # artifacts if they are present in this checkpoint.

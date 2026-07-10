@@ -24,6 +24,7 @@ ARTIFACT_NAMES = [
     "edit_decisions",
     "render_report",
     "publish_log",
+    "release_package",
     "review",
     "cost_log",
     "decision_log",

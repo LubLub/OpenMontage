@@ -1,0 +1,165 @@
+name: generative-documentary
+version: "1.0"
+description: >
+  Research-led documentary production with narration and shot planning as
+  separate tracks, generated-visual planning, and offline release
+  packaging. Channel-specific subject matter, tone, pacing, and evidence
+  policy remain outside this reusable pipeline.
+category: generated
+stability: beta
+default_checkpoint_policy: guided
+
+reference_input:
+  supported: false
+
+orchestration:
+  mode: executive-producer
+  skill: pipelines/generative-documentary/executive-producer
+  budget_default_usd: 10.00
+  max_revisions_per_stage: 3
+  max_send_backs: 2
+  max_wall_time_minutes: 240
+
+extensions:
+  custom_scripts: true
+  custom_playbooks: true
+  custom_skills: true
+  custom_tools: false
+
+required_skills:
+  - pipelines/generative-documentary/executive-producer
+  - pipelines/generative-documentary/research-director
+  - pipelines/generative-documentary/proposal-director
+  - pipelines/generative-documentary/script-director
+  - pipelines/generative-documentary/scene-director
+  - pipelines/generative-documentary/asset-director
+  - pipelines/generative-documentary/edit-director
+  - pipelines/generative-documentary/compose-director
+  - pipelines/generative-documentary/publish-director
+  - meta/reviewer
+  - meta/checkpoint-protocol
+
+compatible_playbooks:
+  custom_allowed: true
+
+metadata:
+  approval_gates:
+    scene_plan: Editorial Approval
+    publish: Release Approval
+  publishing_mode: offline_package_only
+
+stages:
+  - name: research
+    skill: pipelines/generative-documentary/research-director
+    produces: [research_brief]
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Research sharpens one episode thesis rather than surveying a topic
+      - Sources are explicit and usable by later evidence-policy work
+    success_criteria:
+      - Schema-valid research_brief
+
+  - name: proposal
+    skill: pipelines/generative-documentary/proposal-director
+    required_artifacts_in: [research_brief]
+    produces: [proposal_packet, decision_log]
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - One episode thesis and an authored visual treatment are explicit
+      - Provider plan and expected cost are itemized without spending
+    success_criteria:
+      - Schema-valid proposal_packet
+      - Provider, model, and render choices are ready for Editorial Approval
+
+  - name: script
+    skill: pipelines/generative-documentary/script-director
+    required_artifacts_in: [research_brief, proposal_packet]
+    produces: [script]
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Script sections contain spoken narration only
+      - Full claim-to-evidence traceability is deferred to the Editorial Package milestone
+    success_criteria:
+      - Schema-valid script
+      - No visual directions appear in narration text
+
+  - name: scene_plan
+    skill: pipelines/generative-documentary/scene-director
+    required_artifacts_in: [research_brief, proposal_packet, script]
+    produces: [scene_plan]
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Shotlist is separate from narration and covers the complete runtime
+      - Minimal fixture origin metadata is explicit; full provenance enforcement is deferred
+    success_criteria:
+      - Schema-valid scene_plan
+      - Editorial Approval gate presents the current pre-production artifacts
+
+  - name: assets
+    skill: pipelines/generative-documentary/asset-director
+    required_artifacts_in: [proposal_packet, script, scene_plan]
+    produces: [asset_manifest]
+    required_tools: [tts_selector, image_selector]
+    optional_tools: [video_selector, music_gen]
+    tools_available: [tts_selector, image_selector, video_selector, music_gen]
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Dry Run assets use the fixed deterministic fake-provider set
+      - Generated reconstructions cannot be mistaken for historical evidence
+      - Dry Run assets record provider, model, subtype, and zero cost
+    success_criteria:
+      - Schema-valid asset_manifest
+      - Required files exist inside the project workspace
+
+  - name: edit
+    skill: pipelines/generative-documentary/edit-director
+    required_artifacts_in: [script, scene_plan, asset_manifest]
+    produces: [edit_decisions]
+    tools_available: []
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Timeline preserves narration and shotlist alignment
+      - Render runtime and approved provider choices have not changed silently
+    success_criteria:
+      - Schema-valid edit_decisions
+      - Full episode runtime is covered without gaps
+
+  - name: compose
+    skill: pipelines/generative-documentary/compose-director
+    required_artifacts_in: [edit_decisions, asset_manifest]
+    optional_artifacts_in: [script, scene_plan]
+    produces: [render_report]
+    required_tools: [video_compose, audio_mixer]
+    tools_available: [video_compose, audio_mixer, video_stitch]
+    checkpoint_required: true
+    human_approval_default: false
+    review_focus:
+      - Runtime, resolution, duration, audio, and asset completeness are reported
+    success_criteria:
+      - Schema-valid render_report
+
+  - name: publish
+    skill: pipelines/generative-documentary/publish-director
+    required_artifacts_in: [render_report]
+    optional_artifacts_in: [proposal_packet]
+    produces: [publish_log, release_package]
+    required_tools: [export_bundle]
+    tools_available: [export_bundle]
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Release Package includes video, title, thumbnail, description, disclosures, and destination
+      - No network publication or upload occurred
+    success_criteria:
+      - Schema-valid publish_log and release_package
+      - Release Package is prepared offline with deterministic content hashes

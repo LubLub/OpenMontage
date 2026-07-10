@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/release_package",
+  "title": "Release Package",
+  "description": "Deterministic offline package presented at the Release Approval gate.",
+  "type": "object",
+  "required": [
+    "version",
+    "package_id",
+    "package_version",
+    "content_hash",
+    "video",
+    "title",
+    "thumbnail",
+    "files",
+    "description",
+    "disclosures",
+    "destination",
+    "publication_status"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "package_id": { "type": "string", "minLength": 1 },
+    "package_version": { "type": "integer", "minimum": 1 },
+    "content_hash": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Deterministic hash of the package content."
+    },
+    "video": {
+      "type": "object",
+      "required": ["path", "sha256", "format", "resolution", "duration_seconds"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+        "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+"
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "format": { "type": "string", "minLength": 1 },
+        "resolution": { "type": "string", "pattern": "^[1-9][0-9]*x[1-9][0-9]*$" },
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "title": { "type": "string", "minLength": 1 },
+    "thumbnail": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+        "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+"
+        },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
+    "files": {
+      "type": "array",
+      "minItems": 4,
+      "items": {
+        "type": "object",
+        "required": ["role", "path", "sha256"],
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": ["video", "thumbnail", "metadata", "description"]
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+"
+          },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      },
+      "allOf": [
+        { "contains": { "properties": { "role": { "const": "video" } }, "required": ["role"] }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "role": { "const": "thumbnail" } }, "required": ["role"] }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "role": { "const": "metadata" } }, "required": ["role"] }, "minContains": 1, "maxContains": 1 },
+        { "contains": { "properties": { "role": { "const": "description" } }, "required": ["role"] }, "minContains": 1, "maxContains": 1 }
+      ]
+    },
+    "description": { "type": "string", "minLength": 1 },
+    "disclosures": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 },
+      "uniqueItems": true
+    },
+    "destination": {
+      "type": "object",
+      "required": ["platform", "channel", "visibility"],
+      "properties": {
+        "platform": { "type": "string", "minLength": 1 },
+        "channel": { "type": "string", "minLength": 1 },
+        "visibility": { "type": "string", "enum": ["public", "private", "unlisted"] }
+      },
+      "additionalProperties": false
+    },
+    "publication_status": {
+      "type": "string",
+      "const": "not_published",
+      "description": "Offline packaging never performs the external publication side effect."
+    },
+    "metadata": { "type": "object" }
+  },
+  "additionalProperties": false
+}
