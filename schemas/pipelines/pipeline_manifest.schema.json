@@ -4,14 +4,14 @@
   "title": "Pipeline Manifest",
   "description": "Declarative pipeline definition specifying stages, artifacts, tools, and policies.",
   "type": "object",
-  "required": ["name", "version", "stages"],
+  "required": ["name", "version", "category", "stages"],
   "properties": {
     "name": { "type": "string" },
     "version": { "type": "string" },
     "description": { "type": "string" },
     "category": {
       "type": "string",
-      "enum": ["talking_head", "generated", "hybrid", "screen_recording", "animation", "cinematic", "custom"]
+      "enum": ["talking_head", "generated", "hybrid", "screen_recording", "animation", "cinematic", "documentary", "custom"]
     },
     "stability": {
       "type": "string",

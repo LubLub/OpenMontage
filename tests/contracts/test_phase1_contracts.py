@@ -4,7 +4,9 @@ import json
 import sys
 from pathlib import Path
 
+import jsonschema
 import pytest
+import yaml
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
@@ -331,6 +333,21 @@ class TestTalkingHeadManifest:
         for stage in manifest["stages"]:
             if stage["name"] in ("idea", "publish"):
                 assert stage.get("human_approval_default") is True
+
+
+class TestDocumentaryMontageManifest:
+    def test_manifest_loads(self):
+        manifest = load_pipeline("documentary-montage")
+        assert manifest["name"] == "documentary-montage"
+        assert manifest["category"] == "documentary"
+
+    def test_category_is_required(self, tmp_path):
+        manifest = load_pipeline("documentary-montage")
+        manifest.pop("category")
+        (tmp_path / "categoryless.yaml").write_text(yaml.safe_dump(manifest))
+
+        with pytest.raises(jsonschema.ValidationError):
+            load_pipeline("categoryless", defs_dir=tmp_path)
 
 
 # ---- Contract: skill files exist ----
