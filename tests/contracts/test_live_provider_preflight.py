@@ -104,7 +104,7 @@ def _run_command(command: list[str], timeout: int) -> SimpleNamespace:
     return SimpleNamespace(returncode=0, stdout=outputs[tuple(command)], stderr="")
 
 
-def test_preflight_probes_all_six_capabilities_without_paid_actions() -> None:
+def test_preflight_probes_all_six_capabilities_and_defers_paid_research_smoke() -> None:
     higgsfield = FakeHiggsfield()
 
     report = run_live_provider_preflight(
@@ -119,7 +119,7 @@ def test_preflight_probes_all_six_capabilities_without_paid_actions() -> None:
         higgsfield_module=higgsfield,
     )
 
-    assert report["ready"] is True
+    assert report["ready"] is False
     assert report["probe_mode"] == "read_only_no_spend"
     assert report["paid_actions_executed"] is False
     assert report["total_quoted_credits"] == 13.0
@@ -131,7 +131,10 @@ def test_preflight_probes_all_six_capabilities_without_paid_actions() -> None:
         "audio",
         "composition",
     ]
-    assert all(item["status"] == "ready" for item in report["capabilities"])
+    assert report["capabilities"][0]["status"] == "blocked"
+    assert report["capabilities"][0]["evidence_code"] == "auth_and_model_verified"
+    assert report["capabilities"][0]["reason_code"] == "paid_web_search_smoke_required"
+    assert all(item["status"] == "ready" for item in report["capabilities"][1:])
     assert report["capabilities"][2]["unit_quoted_credits"] == 2.5
     assert report["capabilities"][2]["quoted_credits"] == 5.0
     assert higgsfield.commands == [

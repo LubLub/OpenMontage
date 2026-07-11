@@ -104,7 +104,12 @@ def _probe_openai(
             return _blocked(base, "model_unavailable")
     except Exception:
         return _blocked(base, "live_probe_failed")
-    return {**base, "status": "ready", "evidence_code": "auth_and_model_verified"}
+    return {
+        **base,
+        "status": "blocked",
+        "evidence_code": "auth_and_model_verified",
+        "reason_code": "paid_web_search_smoke_required",
+    }
 
 
 def _probe_elevenlabs(
