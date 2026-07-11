@@ -149,7 +149,7 @@ stages:
     skill: pipelines/generative-documentary/compose-director
     required_artifacts_in: [edit_decisions, asset_manifest]
     optional_artifacts_in: [script, scene_plan]
-    produces: [render_report]
+    produces: [render_report, technical_conformance]
     required_tools: [video_compose, audio_mixer]
     tools_available: [video_compose, audio_mixer, video_stitch]
     checkpoint_required: true
@@ -157,11 +157,11 @@ stages:
     review_focus:
       - Runtime, resolution, duration, audio, and asset completeness are reported
     success_criteria:
-      - Schema-valid render_report
+      - Schema-valid render_report and passing technical_conformance
 
   - name: publish
     skill: pipelines/generative-documentary/publish-director
-    required_artifacts_in: [render_report]
+    required_artifacts_in: [render_report, technical_conformance]
     optional_artifacts_in: [proposal_packet]
     produces: [publish_log, release_package]
     required_tools: [export_bundle]

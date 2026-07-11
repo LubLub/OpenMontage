@@ -51,6 +51,7 @@ SUPPLEMENTARY_ARTIFACTS = {
     "final_review",         # Required by compose stage before presenting to user
     "video_analysis_brief", # Reference-video grounding artifact carried alongside stages
     "release_package",      # Deterministic offline package presented at the publish gate
+    "technical_conformance", # Fail-closed automated review of one exact render/policy pair
 }
 
 

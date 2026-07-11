@@ -9,6 +9,7 @@
     "package_id",
     "package_version",
     "content_hash",
+    "technical_conformance",
     "video",
     "title",
     "thumbnail",
@@ -26,6 +27,40 @@
       "type": "string",
       "pattern": "^sha256:[0-9a-f]{64}$",
       "description": "Deterministic hash of the package content."
+    },
+    "technical_conformance": {
+      "type": "object",
+      "required": [
+        "artifact_name",
+        "conformance_id",
+        "conformance_version",
+        "content_hash",
+        "project_id",
+        "compose_attempt_id",
+        "compose_output_fingerprint",
+        "render_sha256",
+        "policy_content_hash",
+        "execution_mode",
+        "status",
+        "manual_rescue_used",
+        "production_proof_eligible"
+      ],
+      "properties": {
+        "artifact_name": { "type": "string", "const": "technical_conformance" },
+        "conformance_id": { "type": "string", "minLength": 1 },
+        "conformance_version": { "type": "integer", "minimum": 1 },
+        "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "project_id": { "type": "string", "minLength": 1 },
+        "compose_attempt_id": { "type": "string", "minLength": 1 },
+        "compose_output_fingerprint": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "render_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "policy_content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+        "execution_mode": { "type": "string", "enum": ["production", "deterministic_fixture"] },
+        "status": { "type": "string", "const": "pass" },
+        "manual_rescue_used": { "type": "boolean" },
+        "production_proof_eligible": { "type": "boolean" }
+      },
+      "additionalProperties": false
     },
     "video": {
       "type": "object",

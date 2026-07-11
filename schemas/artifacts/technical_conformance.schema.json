@@ -1,0 +1,240 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/technical_conformance",
+  "title": "Technical Conformance",
+  "description": "Fail-closed automated evidence bound to one rendered file and one conformance policy. Creative acceptance is outside this artifact.",
+  "type": "object",
+  "required": [
+    "version",
+    "conformance_id",
+    "conformance_version",
+    "content_hash",
+    "render",
+    "policy",
+    "execution_mode",
+    "status",
+    "checks",
+    "manual_rescue",
+    "production_proof"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "conformance_id": { "type": "string", "minLength": 1 },
+    "conformance_version": { "type": "integer", "minimum": 1 },
+    "content_hash": { "$ref": "#/$defs/content_hash" },
+    "render": {
+      "type": "object",
+      "required": [
+        "project_id",
+        "channel_snapshot_hash",
+        "compose_attempt_id",
+        "compose_output_fingerprint",
+        "path",
+        "sha256",
+        "render_report_content_hash"
+      ],
+      "properties": {
+        "project_id": { "type": "string", "minLength": 1 },
+        "channel_snapshot_hash": { "$ref": "#/$defs/content_hash" },
+        "compose_attempt_id": { "type": "string", "minLength": 1 },
+        "compose_output_fingerprint": { "$ref": "#/$defs/content_hash" },
+        "path": { "$ref": "#/$defs/project_path" },
+        "sha256": { "$ref": "#/$defs/raw_sha256" },
+        "render_report_content_hash": { "$ref": "#/$defs/content_hash" }
+      },
+      "additionalProperties": false
+    },
+    "execution_mode": {
+      "type": "string",
+      "enum": ["production", "deterministic_fixture"]
+    },
+    "policy": {
+      "type": "object",
+      "required": ["policy_id", "policy_version", "content_hash"],
+      "properties": {
+        "policy_id": { "type": "string", "minLength": 1 },
+        "policy_version": { "type": "integer", "minimum": 1 },
+        "content_hash": { "$ref": "#/$defs/content_hash" }
+      },
+      "additionalProperties": false
+    },
+    "status": { "type": "string", "enum": ["pass", "fail"] },
+    "checks": {
+      "type": "object",
+      "required": [
+        "file_integrity",
+        "duration",
+        "resolution",
+        "asset_completeness",
+        "broken_frames",
+        "frozen_frames",
+        "unintended_silence",
+        "unsafe_peaks",
+        "narration_timing"
+      ],
+      "properties": {
+        "file_integrity": { "$ref": "#/$defs/check" },
+        "duration": { "$ref": "#/$defs/check" },
+        "resolution": { "$ref": "#/$defs/check" },
+        "asset_completeness": { "$ref": "#/$defs/check" },
+        "broken_frames": { "$ref": "#/$defs/check" },
+        "frozen_frames": { "$ref": "#/$defs/check" },
+        "unintended_silence": { "$ref": "#/$defs/check" },
+        "unsafe_peaks": { "$ref": "#/$defs/check" },
+        "narration_timing": { "$ref": "#/$defs/check" }
+      },
+      "additionalProperties": false
+    },
+    "manual_rescue": {
+      "type": "object",
+      "required": ["used", "rescue_id", "reason", "recorded_at"],
+      "properties": {
+        "used": { "type": "boolean" },
+        "rescue_id": { "type": ["string", "null"] },
+        "reason": { "type": ["string", "null"] },
+        "recorded_at": { "type": ["string", "null"], "format": "date-time" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "used": { "const": true } }, "required": ["used"] },
+          "then": {
+            "properties": {
+              "rescue_id": { "type": "string", "minLength": 1 },
+              "reason": { "type": "string", "minLength": 1 },
+              "recorded_at": { "type": "string", "format": "date-time" }
+            }
+          },
+          "else": {
+            "properties": {
+              "rescue_id": { "const": null },
+              "reason": { "const": null },
+              "recorded_at": { "const": null }
+            }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "production_proof": {
+      "type": "object",
+      "required": ["eligible", "ineligibility_reasons"],
+      "properties": {
+        "eligible": { "type": "boolean" },
+        "ineligibility_reasons": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "fail" } }, "required": ["status"] },
+      "then": {
+        "properties": {
+          "production_proof": {
+            "properties": {
+              "eligible": { "const": false },
+              "ineligibility_reasons": { "minItems": 1 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "pass" },
+          "manual_rescue": { "properties": { "used": { "const": false } }, "required": ["used"] },
+          "execution_mode": { "const": "production" }
+        },
+        "required": ["status", "manual_rescue", "execution_mode"]
+      },
+      "then": {
+        "properties": {
+          "production_proof": {
+            "properties": {
+              "eligible": { "const": true },
+              "ineligibility_reasons": { "maxItems": 0 }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": { "execution_mode": { "const": "deterministic_fixture" } },
+        "required": ["execution_mode"]
+      },
+      "then": {
+        "properties": {
+          "production_proof": {
+            "properties": {
+              "eligible": { "const": false },
+              "ineligibility_reasons": {
+                "minItems": 1,
+                "contains": { "const": "deterministic_fixture" }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": { "const": "pass" },
+          "manual_rescue": { "properties": { "used": { "const": true } }, "required": ["used"] }
+        },
+        "required": ["status", "manual_rescue"]
+      },
+      "then": {
+        "properties": {
+          "production_proof": {
+            "properties": {
+              "eligible": { "const": false },
+              "ineligibility_reasons": { "minItems": 1, "contains": { "const": "manual_rescue_used" } }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "raw_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "project_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+"
+    },
+    "check": {
+      "type": "object",
+      "required": ["status", "evidence_source", "observed", "expected", "issues"],
+      "properties": {
+        "status": { "type": "string", "enum": ["pass", "fail"] },
+        "evidence_source": {
+          "type": "string",
+          "enum": [
+            "ffprobe",
+            "ffmpeg_decode",
+            "blackdetect",
+            "freezedetect",
+            "silencedetect",
+            "ebur128",
+            "artifact_inventory",
+            "timeline_comparison",
+            "deterministic_fixture"
+          ]
+        },
+        "observed": { "type": "string", "minLength": 1 },
+        "expected": { "type": "string", "minLength": 1 },
+        "issues": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

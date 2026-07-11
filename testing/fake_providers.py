@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import struct
+import subprocess
+import tempfile
 import wave
 import zlib
 from pathlib import Path
@@ -134,14 +137,69 @@ class DryRunVideo(_DryRunTool):
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         path = _path(inputs["output_path"])
-        payload = json.dumps(
-            inputs.get("payload", {}),
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-        marker = hashlib.sha256(payload).digest()
-        path.write_bytes(b"\x00\x00\x00\x18ftypmp42dry-run\x00\x00" + marker)
+        fixture_inputs = inputs.get("payload", {})
+        duration = float(fixture_inputs.get("duration_seconds", 30))
+        resolution = str(fixture_inputs.get("resolution", "1920x1080"))
+        try:
+            width_text, height_text = resolution.split("x", 1)
+            width, height = int(width_text), int(height_text)
+        except (TypeError, ValueError):
+            return ToolResult(success=False, error="resolution must be WIDTHxHEIGHT")
+        cache = (
+            Path(tempfile.gettempdir())
+            / f"openmontage-dry-run-av-v2-{width}x{height}-{duration:g}.mp4"
+        )
+        if not cache.is_file():
+            command = [
+                "ffmpeg",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                (
+                    f"color=c=0x303030:s={width}x{height}:r=30:d={duration},"
+                    "drawbox=x=mod(t*120\\,iw):y=ih/3:w=120:h=120:color=0x80a0ff:t=fill"
+                ),
+                "-f",
+                "lavfi",
+                "-i",
+                f"sine=frequency=440:sample_rate=48000:duration={duration}",
+                "-t",
+                f"{duration:g}",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-crf",
+                "35",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "64k",
+                "-movflags",
+                "+faststart",
+                "-y",
+                str(cache),
+            ]
+            try:
+                completed = subprocess.run(
+                    command,
+                    capture_output=True,
+                    text=True,
+                    timeout=max(30, int(duration * 2)),
+                    check=False,
+                )
+            except (OSError, subprocess.SubprocessError) as exc:
+                return ToolResult(success=False, error=f"fixture render failed: {exc}")
+            if completed.returncode != 0 or not cache.is_file():
+                return ToolResult(
+                    success=False,
+                    error=f"fixture render failed: {completed.stderr.strip()}",
+                )
+        shutil.copyfile(cache, path)
         return _result(self, path)
 
 

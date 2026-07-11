@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
@@ -29,11 +30,26 @@ EXPECTED_STAGES = [
 
 def _release_package() -> dict:
     digest = "a" * 64
-    return {
+    package = {
         "version": "1.0",
         "package_id": "dry-run-release",
         "package_version": 1,
         "content_hash": f"sha256:{digest}",
+        "technical_conformance": {
+            "artifact_name": "technical_conformance",
+            "conformance_id": "dry-run-conformance",
+            "conformance_version": 1,
+            "content_hash": f"sha256:{digest}",
+            "project_id": "dry-run",
+            "compose_attempt_id": "compose-attempt-1",
+            "compose_output_fingerprint": f"sha256:{digest}",
+            "render_sha256": digest,
+            "policy_content_hash": f"sha256:{digest}",
+            "execution_mode": "deterministic_fixture",
+            "status": "pass",
+            "manual_rescue_used": False,
+            "production_proof_eligible": False,
+        },
         "video": {
             "path": "renders/final.mp4",
             "sha256": digest,
@@ -64,6 +80,17 @@ def _release_package() -> dict:
         },
         "publication_status": "not_published",
     }
+    scope = dict(package)
+    scope.pop("content_hash")
+    encoded = json.dumps(
+        scope,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    package["content_hash"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return package
 
 
 def _publish_log() -> dict:
@@ -178,6 +205,11 @@ def test_manifest_carries_editorial_artifacts_to_the_existing_gate() -> None:
     assert "claim_ledger" in stages["scene_plan"]["required_artifacts_in"]
     assert stages["scene_plan"]["produces"] == ["scene_plan", "editorial_package"]
     assert "editorial_package" in stages["assets"]["required_artifacts_in"]
+    assert stages["compose"]["produces"] == [
+        "render_report",
+        "technical_conformance",
+    ]
+    assert "technical_conformance" in stages["publish"]["required_artifacts_in"]
 
 
 def _premium_scene_plan() -> dict:
@@ -484,8 +516,31 @@ def test_release_package_schema_is_strict_and_offline() -> None:
         validate_artifact("release_package", package)
 
     schema = load_schema("release_package")
-    assert "technical_conformance" not in schema["required"]
-    assert "technical_conformance" not in schema["properties"]
+    assert "technical_conformance" in schema["required"]
+
+    package = _release_package()
+    package["technical_conformance"]["status"] = "fail"
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("release_package", package)
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["conformance", "video_file", "thumbnail_file", "content_hash"],
+)
+def test_release_package_semantically_binds_approved_media(mismatch: str) -> None:
+    package = _release_package()
+    if mismatch == "conformance":
+        package["technical_conformance"]["render_sha256"] = "b" * 64
+    elif mismatch == "video_file":
+        package["files"][0]["sha256"] = "b" * 64
+    elif mismatch == "thumbnail_file":
+        package["files"][1]["path"] = "assets/images/other.png"
+    else:
+        package["title"] = "Changed after package hashing"
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("release_package", package)
 
 
 def test_claim_ledger_schema_is_strict_and_registered() -> None:

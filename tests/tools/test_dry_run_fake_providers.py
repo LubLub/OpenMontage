@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 from testing.fake_providers import DryRunProviderSet
@@ -49,6 +50,27 @@ def test_stable_facade_writes_identifiable_zero_cost_artifacts(tmp_path: Path) -
         assert result.data["tool"] in FAKE_TOOL_NAMES
         assert Path(result.data["path"]).is_file()
         assert len(result.data["sha256"]) == 64
+
+    probe = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "json",
+            calls[3].data["path"],
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0
+    assert {stream["codec_type"] for stream in json.loads(probe.stdout)["streams"]} == {
+        "video",
+        "audio",
+    }
 
 
 def test_same_inputs_produce_same_bytes(tmp_path: Path) -> None:
