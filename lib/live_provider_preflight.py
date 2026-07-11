@@ -30,10 +30,16 @@ CAPABILITIES = (
 )
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 def _request_json(url: str, headers: dict[str, str], timeout: int) -> object:
     request = urllib.request.Request(url, headers=headers, method="GET")
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(request, timeout=timeout) as response:
             payload = response.read(4 * 1024 * 1024 + 1)
             if len(payload) > 4 * 1024 * 1024:
                 raise RuntimeError("read-only provider probe response was too large")
@@ -190,12 +196,30 @@ def _probe_ffmpeg(
 ) -> dict[str, Any]:
     base = _base_result(capability, choice)
     try:
-        process = run_command(["ffmpeg", "-version"], 15)
-        if process.returncode != 0:
+        if capability == "audio":
+            process = run_command(["ffmpeg", "-hide_banner", "-filters"], 15)
+            output = f"{process.stdout}\n{process.stderr}"
+            available = process.returncode == 0 and all(
+                required in output for required in ("amix", "loudnorm")
+            )
+        else:
+            process = run_command(["ffmpeg", "-hide_banner", "-encoders"], 15)
+            probe = run_command(["ffprobe", "-version"], 15)
+            output = f"{process.stdout}\n{process.stderr}"
+            available = (
+                process.returncode == 0
+                and probe.returncode == 0
+                and "libx264" in output
+            )
+        if not available:
             return _blocked(base, "runtime_unavailable")
     except Exception:
         return _blocked(base, "runtime_unavailable")
-    return {**base, "status": "ready", "evidence_code": "local_runtime_verified"}
+    return {
+        **base,
+        "status": "ready",
+        "evidence_code": "required_local_runtime_features_verified",
+    }
 
 
 def _validate_plan(plan: Mapping[str, Any]) -> None:

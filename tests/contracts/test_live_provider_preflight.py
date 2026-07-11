@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import json
 import math
+import urllib.request
 from types import SimpleNamespace
 
 import pytest
 
-from lib.live_provider_preflight import run_live_provider_preflight
+from lib.live_provider_preflight import _NoRedirect, run_live_provider_preflight
 
 
 def _plan() -> dict:
@@ -93,9 +94,14 @@ def _request_json(url: str, headers: dict[str, str], timeout: int) -> object:
 
 
 def _run_command(command: list[str], timeout: int) -> SimpleNamespace:
-    assert command == ["ffmpeg", "-version"]
     assert timeout <= 15
-    return SimpleNamespace(returncode=0, stdout="ffmpeg version secret-build", stderr="")
+    outputs = {
+        ("ffmpeg", "-hide_banner", "-filters"): "amix loudnorm",
+        ("ffmpeg", "-hide_banner", "-encoders"): "libx264",
+        ("ffprobe", "-version"): "ffprobe version secret-build",
+    }
+    assert tuple(command) in outputs
+    return SimpleNamespace(returncode=0, stdout=outputs[tuple(command)], stderr="")
 
 
 def test_preflight_probes_all_six_capabilities_without_paid_actions() -> None:
@@ -200,6 +206,23 @@ def test_invalid_or_extra_capability_plan_is_rejected_before_probes() -> None:
 
     with pytest.raises(ValueError, match="exactly the six Rehearsal capabilities"):
         run_live_provider_preflight(plan)
+
+
+def test_credential_probe_refuses_all_redirects() -> None:
+    handler = _NoRedirect()
+    request = urllib.request.Request(
+        "https://api.openai.com/v1/models",
+        headers={"Authorization": "Bearer must-not-forward"},
+    )
+
+    assert handler.redirect_request(
+        request,
+        None,
+        302,
+        "redirect",
+        {},
+        "https://attacker.invalid/steal",
+    ) is None
 
 
 @pytest.mark.parametrize("quoted", [math.nan, math.inf, -1.0, True])
