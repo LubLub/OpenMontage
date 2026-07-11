@@ -7,6 +7,20 @@
   "required": ["version", "assets"],
   "properties": {
     "version": { "type": "string", "const": "1.0" },
+    "profile": {
+      "type": "string",
+      "const": "provenance-aware-documentary-v1"
+    },
+    "approval_scope": {
+      "type": "object",
+      "required": ["package_id", "package_version", "content_hash"],
+      "properties": {
+        "package_id": { "type": "string", "minLength": 1 },
+        "package_version": { "type": "integer", "minimum": 1 },
+        "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" }
+      },
+      "additionalProperties": false
+    },
     "assets": {
       "type": "array",
       "items": {
@@ -34,6 +48,93 @@
           "provider": { "type": "string", "description": "Provider name (e.g. pixabay, google_imagen)" },
           "license": { "type": "string", "description": "License type (e.g. Pixabay License, CC0)" },
           "original_url": { "type": "string", "description": "Source URL if downloaded from a stock service" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+          "visual_type": {
+            "type": "string",
+            "enum": ["historical_anchor", "generated_reconstruction", "thumbnail", "non_visual"]
+          },
+          "reconstruction_status": {
+            "type": "string",
+            "enum": ["not_reconstruction", "generated_reconstruction", "not_applicable"]
+          },
+          "provenance": {
+            "type": "object",
+            "required": ["origin", "represented_as_archival"],
+            "properties": {
+              "origin": {
+                "type": "string",
+                "enum": ["public_domain", "licensed_source", "ai_generated", "local_derivative", "deterministic_fixture"]
+              },
+              "source_title": { "type": "string", "minLength": 1 },
+              "source_url": { "type": "string", "pattern": "^https?://[^\\s/?#]+(?:[/?#]\\S*)?$" },
+              "source_id": { "type": "string", "minLength": 1 },
+              "creator": { "type": "string", "minLength": 1 },
+              "rights_holder": { "type": "string", "minLength": 1 },
+              "provider": { "type": "string", "minLength": 1 },
+              "model": { "type": "string", "minLength": 1 },
+              "prompt": { "type": "string", "minLength": 1 },
+              "seed": { "type": "integer" },
+              "source_asset_id": { "type": "string", "minLength": 1 },
+              "represented_as_archival": { "type": "boolean" },
+              "fixture_proxy": { "type": "boolean" },
+              "rights": {
+                "type": "object",
+                "properties": {
+                  "public_domain": {
+                    "type": "object",
+                    "required": ["basis", "source_url"],
+                    "properties": {
+                      "basis": { "type": "string", "minLength": 1 },
+                      "source_url": { "type": "string", "pattern": "^https?://[^\\s/?#]+(?:[/?#]\\S*)?$" }
+                    },
+                    "additionalProperties": false
+                  },
+                  "license": {
+                    "type": "object",
+                    "required": ["name"],
+                    "properties": {
+                      "name": { "type": "string", "minLength": 1 },
+                      "url": { "type": "string", "pattern": "^https?://[^\\s/?#]+(?:[/?#]\\S*)?$" },
+                      "attribution": { "type": "string" }
+                    },
+                    "additionalProperties": false
+                  }
+                },
+                "oneOf": [
+                  { "required": ["public_domain"] },
+                  { "required": ["license"] }
+                ],
+                "additionalProperties": false
+              }
+            },
+            "allOf": [
+              {
+                "if": { "properties": { "origin": { "const": "public_domain" } } },
+                "then": {
+                  "required": ["rights"],
+                  "properties": { "rights": { "required": ["public_domain"] } }
+                }
+              },
+              {
+                "if": { "properties": { "origin": { "const": "licensed_source" } } },
+                "then": {
+                  "required": ["rights"],
+                  "properties": { "rights": { "required": ["license"] } }
+                }
+              }
+            ],
+            "additionalProperties": false
+          },
+          "motion": {
+            "type": "object",
+            "required": ["mode", "instructions"],
+            "properties": {
+              "mode": { "type": "string", "enum": ["static", "local_motion", "generated_video", "not_applicable"] },
+              "instructions": { "type": "string", "minLength": 1 },
+              "source_asset_id": { "type": "string", "minLength": 1 }
+            },
+            "additionalProperties": false
+          },
           "voice_performance": {
             "type": "object",
             "description": "Applied voice-performance contract for narration assets.",
@@ -58,5 +159,81 @@
     "total_cost_usd": { "type": "number", "minimum": 0 },
     "metadata": { "type": "object" }
   },
+  "allOf": [
+    {
+      "if": {
+        "required": ["profile"],
+        "properties": {
+          "profile": { "const": "provenance-aware-documentary-v1" }
+        }
+      },
+      "then": {
+        "required": ["approval_scope"],
+        "properties": {
+          "assets": {
+            "items": {
+              "required": ["sha256", "visual_type", "reconstruction_status", "provenance"],
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "visual_type": {
+                        "enum": ["historical_anchor", "generated_reconstruction"]
+                      }
+                    }
+                  },
+                  "then": { "required": ["motion"] }
+                },
+                {
+                  "if": { "properties": { "type": { "const": "video" } } },
+                  "then": {
+                    "required": ["motion"],
+                    "properties": {
+                      "visual_type": { "const": "generated_reconstruction" },
+                      "reconstruction_status": { "const": "generated_reconstruction" },
+                      "motion": {
+                        "properties": { "mode": { "const": "generated_video" } }
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": {
+                      "type": { "enum": ["narration", "music"] }
+                    }
+                  },
+                  "then": {
+                    "properties": { "visual_type": { "const": "non_visual" } }
+                  }
+                },
+                {
+                  "if": { "properties": { "type": { "const": "animation" } } },
+                  "then": {
+                    "required": ["motion"],
+                    "properties": {
+                      "visual_type": { "const": "non_visual" },
+                      "provenance": {
+                        "properties": { "origin": { "const": "local_derivative" } }
+                      },
+                      "motion": {
+                        "properties": { "mode": { "const": "local_motion" } }
+                      }
+                    }
+                  }
+                },
+                {
+                  "if": {
+                    "properties": { "visual_type": { "const": "thumbnail" } }
+                  },
+                  "then": { "properties": { "type": { "const": "image" } } }
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  ],
   "additionalProperties": false
 }

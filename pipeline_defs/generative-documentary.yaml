@@ -101,9 +101,12 @@ stages:
     review_focus:
       - Shotlist is separate from narration and covers the complete runtime
       - Editorial Package binds the thesis, script, ledger, shotlist, provider plan, and cost
-      - Minimal fixture origin metadata is explicit; full provenance enforcement is deferred
+      - Every shot declares visual type, source or provider plan, provenance plan, reconstruction status, and motion treatment
+      - Generated video is proposed only for explicitly selected hero moments
     success_criteria:
       - Schema-valid scene_plan
+      - Historical Anchors declare a licensed or public-domain rights plan
+      - Generated Reconstructions are explicitly distinguished from archival evidence
       - Schema-valid, versioned editorial_package
       - Editorial Approval gate presents the exact Editorial Package
 
@@ -119,9 +122,13 @@ stages:
     review_focus:
       - Dry Run assets use the fixed deterministic fake-provider set
       - Generated reconstructions cannot be mistaken for historical evidence
-      - Dry Run assets record provider, model, subtype, and zero cost
+      - Historical Anchors retain license or public-domain provenance metadata
+      - Local motion is used for still treatments and generated video is limited to approved hero moments
     success_criteria:
       - Schema-valid asset_manifest
+      - Asset manifest uses the provenance-aware documentary profile and binds the approved Editorial Package scope
+      - Narration, Historical Anchors, Generated Reconstructions, local-motion instructions, music, and selected hero video are present
+      - Every asset records its content hash, scene linkage, provenance, and reconstruction status
       - Required files exist inside the project workspace
 
   - name: edit

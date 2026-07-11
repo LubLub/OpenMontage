@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import jsonschema
 import pytest
@@ -177,6 +178,291 @@ def test_manifest_carries_editorial_artifacts_to_the_existing_gate() -> None:
     assert "claim_ledger" in stages["scene_plan"]["required_artifacts_in"]
     assert stages["scene_plan"]["produces"] == ["scene_plan", "editorial_package"]
     assert "editorial_package" in stages["assets"]["required_artifacts_in"]
+
+
+def _premium_scene_plan() -> dict:
+    return {
+        "version": "1.0",
+        "metadata": {"visual_tier": "premium"},
+        "scenes": [
+            {
+                "id": "scene-1",
+                "type": "generated",
+                "description": "A sourced street photograph receives a slow local push.",
+                "start_seconds": 0,
+                "end_seconds": 10,
+                "hero_moment": False,
+                "visual_type": "historical_anchor",
+                "source_plan": {"mode": "source", "source_id": "archive-plate-1"},
+                "provenance_plan": {
+                    "origin": "deterministic_fixture",
+                    "source_title": "Archive plate 1",
+                    "source_url": "https://example.gov/archive/plate-1",
+                    "fixture_proxy": True,
+                    "represented_as_archival": False,
+                    "rights": {
+                        "public_domain": {
+                            "basis": "Published by the issuing government archive",
+                            "source_url": "https://example.gov/archive/rights",
+                        }
+                    },
+                },
+                "reconstruction_status": "not_reconstruction",
+                "motion_treatment": {
+                    "mode": "local_motion",
+                    "instructions": "Apply a slow 4 percent push over ten seconds.",
+                },
+            }
+        ],
+    }
+
+
+def _premium_asset_manifest() -> dict:
+    digest = "c" * 64
+    common = {
+        "source_tool": "dry_run_fixture",
+        "scene_id": "scene-1",
+        "provider": "dry_run",
+        "model": "deterministic-fixture-v1",
+        "cost_usd": 0,
+        "sha256": digest,
+    }
+    return {
+        "version": "1.0",
+        "profile": "provenance-aware-documentary-v1",
+        "approval_scope": {
+            "package_id": "dry-run-editorial",
+            "package_version": 1,
+            "content_hash": f"sha256:{digest}",
+        },
+        "assets": [
+            {
+                **common,
+                "id": "anchor-1",
+                "type": "image",
+                "path": "assets/images/anchor.png",
+                "visual_type": "historical_anchor",
+                "reconstruction_status": "not_reconstruction",
+                "provenance": {
+                    "origin": "deterministic_fixture",
+                    "source_id": "archive-plate-1",
+                    "source_title": "Archive plate 1",
+                    "source_url": "https://example.gov/archive/plate-1",
+                    "fixture_proxy": True,
+                    "rights": {
+                        "public_domain": {
+                            "basis": "Published by the issuing government archive",
+                            "source_url": "https://example.gov/archive/rights",
+                        }
+                    },
+                    "represented_as_archival": False,
+                },
+                "motion": {
+                    "mode": "local_motion",
+                    "instructions": "Apply a slow push.",
+                    "source_asset_id": "anchor-1",
+                },
+            },
+            {
+                **common,
+                "id": "narration",
+                "type": "narration",
+                "path": "assets/audio/narration.wav",
+                "visual_type": "non_visual",
+                "reconstruction_status": "not_applicable",
+                "provenance": {
+                    "origin": "deterministic_fixture",
+                    "provider": "dry_run",
+                    "model": "deterministic-fixture-v1",
+                    "represented_as_archival": False,
+                },
+                "motion": {
+                    "mode": "not_applicable",
+                    "instructions": "Narration has no visual motion treatment.",
+                },
+            },
+        ],
+        "total_cost_usd": 0,
+    }
+
+
+def test_premium_documentary_vocabulary_is_schema_valid_and_strict() -> None:
+    scene_plan = _premium_scene_plan()
+    asset_manifest = _premium_asset_manifest()
+    validate_artifact("scene_plan", scene_plan)
+    validate_artifact("asset_manifest", asset_manifest)
+
+    del scene_plan["scenes"][0]["motion_treatment"]
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("scene_plan", scene_plan)
+
+    del asset_manifest["assets"][0]["provenance"]
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("asset_manifest", asset_manifest)
+
+
+def test_premium_scene_requires_visual_type_when_other_premium_fields_remain() -> None:
+    scene_plan = _premium_scene_plan()
+    del scene_plan["scenes"][0]["visual_type"]
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("scene_plan", scene_plan)
+
+
+def test_generated_reconstruction_cannot_be_structurally_archival() -> None:
+    scene_plan = _premium_scene_plan()
+    scene = scene_plan["scenes"][0]
+    scene.update(
+        hero_moment=True,
+        visual_type="generated_reconstruction",
+        source_plan={
+            "mode": "generate",
+            "provider": "dry_run",
+            "model": "deterministic-fixture-v1",
+        },
+        reconstruction_status="generated_reconstruction",
+        motion_treatment={
+            "mode": "generated_video",
+            "instructions": "Create the selected hero movement.",
+            "provider": "dry_run",
+            "model": "deterministic-fixture-v1",
+        },
+    )
+    scene["provenance_plan"] = {
+        "origin": "deterministic_fixture",
+        "represented_as_archival": True,
+    }
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("scene_plan", scene_plan)
+
+    scene["provenance_plan"]["represented_as_archival"] = False
+    validate_artifact("scene_plan", scene_plan)
+
+
+def test_generated_video_motion_requires_provider_and_model() -> None:
+    scene_plan = _premium_scene_plan()
+    scene_plan["scenes"][0]["motion_treatment"] = {
+        "mode": "generated_video",
+        "instructions": "Create the selected hero movement.",
+    }
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("scene_plan", scene_plan)
+
+
+def test_generated_video_requires_a_generated_reconstruction_hero() -> None:
+    scene_plan = _premium_scene_plan()
+    scene = scene_plan["scenes"][0]
+    scene["hero_moment"] = False
+    scene["motion_treatment"] = {
+        "mode": "generated_video",
+        "instructions": "Create the selected hero movement.",
+        "provider": "dry_run",
+        "model": "deterministic-fixture-v1",
+    }
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("scene_plan", scene_plan)
+
+
+def test_source_and_generate_plans_are_mode_exclusive() -> None:
+    scene_plan = _premium_scene_plan()
+    scene_plan["scenes"][0]["source_plan"].update(
+        provider="dry_run",
+        model="deterministic-fixture-v1",
+    )
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("scene_plan", scene_plan)
+
+
+def test_premium_video_role_cannot_be_relabelled() -> None:
+    manifest = _premium_asset_manifest()
+    video = {
+        **manifest["assets"][0],
+        "id": "hero-video",
+        "type": "video",
+        "path": "assets/video/hero.mp4",
+        "visual_type": "non_visual",
+        "reconstruction_status": "not_applicable",
+        "motion": {
+            "mode": "generated_video",
+            "instructions": "Create the selected hero movement.",
+            "source_asset_id": "anchor-1",
+        },
+    }
+    manifest["assets"].append(video)
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("asset_manifest", manifest)
+
+
+@pytest.mark.parametrize(
+    ("artifact_name", "mutate"),
+    [
+        (
+            "scene_plan",
+            lambda value: value["scenes"][0]["provenance_plan"].update(
+                source_url="../archive-plate"
+            ),
+        ),
+        (
+            "scene_plan",
+            lambda value: value["scenes"][0]["provenance_plan"]["rights"][
+                "public_domain"
+            ].update(source_url="file:///archive/rights"),
+        ),
+        (
+            "asset_manifest",
+            lambda value: value["assets"][0]["provenance"].update(
+                source_url="archive.example/plate"
+            ),
+        ),
+        (
+            "asset_manifest",
+            lambda value: value["assets"][0]["provenance"].update(
+                source_url="https://?missing-host"
+            ),
+        ),
+    ],
+)
+def test_premium_provenance_urls_are_absolute_http_urls(
+    artifact_name: str,
+    mutate: Callable[[dict], None],
+) -> None:
+    artifact = (
+        _premium_scene_plan()
+        if artifact_name == "scene_plan"
+        else _premium_asset_manifest()
+    )
+    mutate(artifact)
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact(artifact_name, artifact)
+
+
+def test_premium_asset_manifest_requires_approval_scope() -> None:
+    manifest = _premium_asset_manifest()
+    del manifest["approval_scope"]
+
+    with pytest.raises(jsonschema.ValidationError):
+        validate_artifact("asset_manifest", manifest)
+
+
+def test_premium_policy_is_owned_by_director_skills() -> None:
+    root = Path(__file__).resolve().parents[2]
+    scene_director = (
+        root / "skills/pipelines/generative-documentary/scene-director.md"
+    ).read_text()
+    asset_director = (
+        root / "skills/pipelines/generative-documentary/asset-director.md"
+    ).read_text()
+
+    assert "never describe or label it as\narchival evidence" in scene_director
+    assert "license record or public-domain basis" in asset_director
+    assert "marks it as a hero moment" in asset_director
+    assert "Refuse an absent or\nstale approval" in asset_director
 
 
 def test_every_stage_director_is_present() -> None:

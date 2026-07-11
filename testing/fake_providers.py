@@ -156,6 +156,42 @@ class DryRunThumbnail(_DryRunTool):
         return _result(self, path)
 
 
+class DryRunHistoricalAnchor(_DryRunTool):
+    """Create a stable local image fixture for provenance contract tests."""
+
+    name = "dry_run_historical_anchor"
+    tier = ToolTier.GENERATE
+    capability = "image_generation"
+
+    def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        path = _path(inputs["output_path"])
+        path.write_bytes(_png_bytes(str(inputs.get("fixture_key", ""))))
+        return _result(self, path)
+
+
+class DryRunLocalMotion(_DryRunTool):
+    """Write canonical local-motion instructions without rendering media."""
+
+    name = "dry_run_local_motion"
+    tier = ToolTier.GENERATE
+    capability = "motion_instructions"
+
+    def execute(self, inputs: dict[str, Any]) -> ToolResult:
+        path = _path(inputs["output_path"])
+        payload = inputs.get("instructions", {})
+        path.write_text(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return _result(self, path)
+
+
 class DryRunProviderSet:
     """Stable facade used by the Studio's offline Dry Run runner."""
 
@@ -165,6 +201,8 @@ class DryRunProviderSet:
         self._music = DryRunMusic()
         self._video = DryRunVideo()
         self._thumbnail = DryRunThumbnail()
+        self._historical_anchor = DryRunHistoricalAnchor()
+        self._local_motion = DryRunLocalMotion()
 
     def narration(self, output_path: str | Path, text: str) -> ToolResult:
         return self._narration.execute({"output_path": str(output_path), "text": text})
@@ -180,3 +218,21 @@ class DryRunProviderSet:
 
     def thumbnail(self, output_path: str | Path, prompt: str) -> ToolResult:
         return self._thumbnail.execute({"output_path": str(output_path), "prompt": prompt})
+
+    def historical_anchor(
+        self,
+        output_path: str | Path,
+        fixture_key: str,
+    ) -> ToolResult:
+        return self._historical_anchor.execute(
+            {"output_path": str(output_path), "fixture_key": fixture_key}
+        )
+
+    def local_motion(
+        self,
+        output_path: str | Path,
+        instructions: dict[str, Any],
+    ) -> ToolResult:
+        return self._local_motion.execute(
+            {"output_path": str(output_path), "instructions": instructions}
+        )

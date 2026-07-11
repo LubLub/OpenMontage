@@ -10,6 +10,11 @@ keep every
 artifact in the project workspace, record provider costs, and never replace an approved provider,
 model, or render path silently.
 
+Immediately before asset generation, verify that the Editorial Approval receipt
+is present and matches the current Editorial Package ID, version, and content
+hash. Refuse the stage if the receipt is absent, stale, or scoped to different
+content. Copy that exact scope into the Premium `asset_manifest.approval_scope`.
+
 This is a research-and-generation pipeline, not a stock montage. Historical
 source material may be used as an authored Historical Anchor, but retrieval,
 clip ranking, and corpus size are not pipeline assumptions. Channel tone,
