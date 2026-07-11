@@ -136,7 +136,78 @@ def _collect_history(project_dir: Path) -> dict[str, list[dict]]:
     return out
 
 
+def _checkpoint_projection(checkpoint: dict) -> dict[str, Any]:
+    """Board-safe audit fields from one authoritative checkpoint version."""
+    metadata = checkpoint.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    artifacts = checkpoint.get("artifacts")
+    if not isinstance(artifacts, dict):
+        artifacts = {}
+    cost_snapshot = checkpoint.get("cost_snapshot")
+    if not isinstance(cost_snapshot, dict):
+        cost_snapshot = None
+    return {
+        "status": checkpoint.get("status"),
+        "timestamp": checkpoint.get("timestamp"),
+        "attempt_id": checkpoint.get("attempt_id"),
+        "error": checkpoint.get("error"),
+        "human_approval_required": checkpoint.get("human_approval_required"),
+        "human_approved": checkpoint.get("human_approved"),
+        "approval_name": metadata.get("approval_name"),
+        "approval_scope_hash": metadata.get("approval_scope_hash"),
+        "cost_snapshot": cost_snapshot,
+        "artifact_names": sorted(str(name) for name in artifacts),
+    }
+
+
+def _approval_projection(checkpoint: Optional[dict]) -> Optional[dict[str, Any]]:
+    """Normalize the current gate state without consulting another store."""
+    if not checkpoint or not checkpoint.get("human_approval_required"):
+        return None
+    metadata = checkpoint.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if checkpoint.get("status") == "awaiting_human":
+        status = "pending"
+    elif checkpoint.get("status") == "completed" and checkpoint.get("human_approved"):
+        status = "approved"
+    else:
+        status = "required"
+    return {
+        "name": metadata.get("approval_name") or "Human Approval",
+        "status": status,
+        "scope_hash": metadata.get("approval_scope_hash"),
+    }
+
+
+def _failure_projection(versions: list[dict], checkpoint: Optional[dict]) -> list[dict[str, Any]]:
+    failures = []
+    for version in versions + ([checkpoint] if checkpoint else []):
+        if version.get("status") != "failed":
+            continue
+        failures.append({
+            "timestamp": version.get("timestamp"),
+            "attempt_id": version.get("attempt_id"),
+            "error": version.get("error"),
+        })
+    return failures
+
+
+def _checkpoint_artifacts(project_dir: Path, checkpoint: Optional[dict]) -> dict[str, dict]:
+    """Resolve only artifacts bound to this exact current checkpoint."""
+    if not checkpoint or not isinstance(checkpoint.get("artifacts"), dict):
+        return {}
+    resolved = {}
+    for name, value in checkpoint["artifacts"].items():
+        artifact = _resolve_artifact(project_dir, value)
+        if artifact is not None:
+            resolved[str(name)] = artifact
+    return resolved
+
+
 def _build_stage_rail(
+    project_dir: Path,
     pipeline_meta: dict,
     checkpoints: dict[str, dict],
     history: dict[str, list[dict]],
@@ -149,21 +220,28 @@ def _build_stage_rail(
         cp = checkpoints.get(name)
         versions = history.get(name, [])
         status = cp.get("status") if cp else "pending"
+        artifact_names = _checkpoint_projection(cp)["artifact_names"] if cp else []
+        stage_artifacts = _checkpoint_artifacts(project_dir, cp)
         entry: dict[str, Any] = {
             "name": name,
             "gated": stage_def["gated"],
             "status": status or "pending",
             "timestamp": cp.get("timestamp") if cp else None,
+            "attempt_id": cp.get("attempt_id") if cp else None,
             "review": cp.get("review") if cp else None,
             "cost_snapshot": cp.get("cost_snapshot") if cp else None,
             "error": cp.get("error") if cp else None,
             "human_approved": cp.get("human_approved") if cp else None,
+            "approval": _approval_projection(cp),
+            "artifact_names": artifact_names,
+            "artifacts": stage_artifacts,
+            "failures": _failure_projection(versions, cp),
             "partial_progress": (cp.get("metadata") or {}).get("partial_progress") if cp else None,
             "versions": len(versions) + (1 if cp else 0),
             # Chronological status trail (history + current) — powers replay.
             "history_entries": (
-                [{"status": v.get("status"), "timestamp": v.get("timestamp")} for v in versions]
-                + ([{"status": cp.get("status"), "timestamp": cp.get("timestamp")}] if cp else [])
+                [_checkpoint_projection(v) for v in versions]
+                + ([_checkpoint_projection(cp)] if cp else [])
             ),
         }
         # Gate audit: a gated stage that completed without ever passing
@@ -185,17 +263,27 @@ def _build_stage_rail(
     for name, cp in checkpoints.items():
         if name in manifest_stage_names:
             continue
+        versions = history.get(name, [])
+        projected = _checkpoint_projection(cp)
         entry = {
             "name": name,
             "gated": False,
             "status": cp.get("status") or "unknown",
             "timestamp": cp.get("timestamp"),
+            "attempt_id": cp.get("attempt_id"),
             "review": cp.get("review"),
             "cost_snapshot": cp.get("cost_snapshot"),
             "error": cp.get("error"),
             "human_approved": cp.get("human_approved"),
+            "approval": _approval_projection(cp),
+            "artifact_names": projected["artifact_names"],
+            "artifacts": _checkpoint_artifacts(project_dir, cp),
+            "failures": _failure_projection(versions, cp),
             "partial_progress": None,
-            "versions": 1 + len(history.get(name, [])),
+            "versions": 1 + len(versions),
+            "history_entries": (
+                [_checkpoint_projection(v) for v in versions] + [projected]
+            ),
             "undeclared": True,
         }
         pos = canon.get(name)
@@ -232,25 +320,39 @@ ARTIFACT_FILES = {
 
 
 def _collect_artifacts(project_dir: Path, checkpoints: dict[str, dict]) -> dict[str, dict]:
-    """Artifacts from artifacts/*.json, backfilled from checkpoint payloads."""
+    """Checkpoint-bound artifacts, with materialized files as legacy fallback."""
     artifacts: dict[str, dict] = {}
-    art_dir = project_dir / "artifacts"
-    for name, filename in ARTIFACT_FILES.items():
-        data = _read_json(art_dir / filename)
-        if data is not None:
-            artifacts[name] = data
-    # decision_log historically also lives at project root
-    if "decision_log" not in artifacts:
-        data = _read_json(project_dir / "decision_log.json")
-        if data is not None:
-            artifacts["decision_log"] = data
-    # Backfill from checkpoint-embedded artifacts.
-    for cp in checkpoints.values():
+    checkpoint_decision_log = None
+    # Current checkpoints are authoritative. Later checkpoint writes win when
+    # an artifact (for example claim_ledger) is produced by multiple stages.
+    for cp in sorted(checkpoints.values(), key=lambda item: item.get("_mtime", 0)):
         for name, value in (cp.get("artifacts") or {}).items():
-            if name not in artifacts:
-                resolved = _resolve_artifact(project_dir, value)
+            resolved = _resolve_artifact(project_dir, value)
+            if name == "decision_log":
                 if resolved is not None:
-                    artifacts[name] = resolved
+                    checkpoint_decision_log = resolved
+            elif resolved is not None:
+                artifacts[name] = resolved
+    # Only genuinely legacy projects without current checkpoints may fall back
+    # to materialized files. Supersession intentionally leaves those files on
+    # disk, so consulting them for a checkpointed run would resurrect stale
+    # downstream artifacts on pending stages.
+    is_studio_episode = (project_dir / "channel_snapshot.json").is_file()
+    if not checkpoints or not is_studio_episode:
+        art_dir = project_dir / "artifacts"
+        for name, filename in ARTIFACT_FILES.items():
+            if name in artifacts:
+                continue
+            data = _read_json(art_dir / filename)
+            if data is not None:
+                artifacts[name] = data
+    # The checkpoint writer merges decision fragments into this canonical root
+    # log. Prefer it so decisions from earlier stages are not lost.
+    decision_log = _read_json(project_dir / "decision_log.json")
+    if decision_log is not None:
+        artifacts["decision_log"] = decision_log
+    elif checkpoint_decision_log is not None:
+        artifacts["decision_log"] = checkpoint_decision_log
     return artifacts
 
 
@@ -598,7 +700,7 @@ def load_board_state(project_dir: Path) -> dict[str, Any]:
     storyboard = _build_storyboard(project_dir, artifacts, events)
     media = _scan_media(project_dir)
 
-    stages = _build_stage_rail(pipeline_meta, checkpoints, history)
+    stages = _build_stage_rail(project_dir, pipeline_meta, checkpoints, history)
 
     # Cost: latest checkpoint snapshot wins; fall back to manifest total.
     cost = None

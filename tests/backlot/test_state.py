@@ -190,6 +190,180 @@ class TestLibrary:
         assert summary["active_stage"] == "script"
 
 
+class TestEpisodeRunProjection:
+    def test_root_decision_log_preserves_decisions_from_multiple_stages(self, projects_root):
+        p = _make_project(projects_root, "studio--decisions")
+        first = {"id": "decision-1", "selected": "option-a"}
+        second = {"id": "decision-2", "selected": "option-b"}
+        _write(p / "decision_log.json", {
+            "version": "1.0",
+            "decisions": [first, second],
+        })
+        _write(p / "checkpoint_proposal.json", {
+            "stage": "proposal",
+            "status": "completed",
+            "artifacts": {
+                "decision_log": {"version": "1.0", "decisions": [first]},
+            },
+        })
+        _write(p / "checkpoint_scene_plan.json", {
+            "stage": "scene_plan",
+            "status": "completed",
+            "artifacts": {
+                "decision_log": {"version": "1.0", "decisions": [second]},
+            },
+        })
+
+        state = load_board_state(p)
+
+        assert state["artifacts"]["decision_log"]["decisions"] == [first, second]
+
+    def test_checkpointed_run_does_not_resurrect_superseded_artifact_files(
+        self,
+        projects_root,
+    ):
+        p = _make_project(projects_root, "studio--superseded")
+        _write(p / "channel_snapshot.json", {"version": "1.0"})
+        _write(p / "artifacts" / "release_package.json", {
+            "version": "1.0",
+            "package_id": "stale-release",
+        })
+        _write(p / "checkpoint_research.json", {
+            "stage": "research",
+            "status": "completed",
+            "artifacts": {"research_brief": {"version": "1.0"}},
+        })
+
+        state = load_board_state(p)
+
+        assert "release_package" not in state["artifacts"]
+
+    def test_checkpoint_artifact_wins_over_divergent_materialized_file(self, projects_root):
+        p = _make_project(projects_root, "studio--authoritative-artifact")
+        _write(p / "artifacts" / "script.json", {
+            "version": "1.0",
+            "title": "tampered materialized file",
+        })
+        _write(p / "checkpoint_script.json", {
+            "stage": "script",
+            "status": "completed",
+            "timestamp": "2026-07-10T09:00:00Z",
+            "artifacts": {
+                "script": {
+                    "version": "1.0",
+                    "title": "checkpoint-bound script",
+                },
+            },
+        })
+
+        state = load_board_state(p)
+
+        assert state["artifacts"]["script"]["title"] == "checkpoint-bound script"
+
+    def test_projects_checkpoint_approval_cost_and_version_history(self, projects_root):
+        p = _make_project(projects_root, "studio--episode-001")
+        _write(p / "project.json", {
+            "title": "Studio Episode",
+            "pipeline_type": "generative-documentary",
+        })
+        _write(p / "history" / "checkpoint_scene_plan_20260710.json", {
+            "stage": "scene_plan",
+            "status": "awaiting_human",
+            "timestamp": "2026-07-10T10:00:00Z",
+            "attempt_id": "attempt-scene-1",
+            "human_approval_required": True,
+            "human_approved": False,
+            "cost_snapshot": {"total_spent_usd": 0, "budget_remaining_usd": 25},
+            "metadata": {
+                "approval_name": "Editorial Approval",
+                "approval_scope_hash": f"sha256:{'a' * 64}",
+            },
+            "artifacts": {
+                "scene_plan": {"version": "1.0", "scenes": []},
+                "editorial_package": {"version": "1.0", "package_id": "editorial-1"},
+            },
+        })
+        _write(p / "checkpoint_scene_plan.json", {
+            "stage": "scene_plan",
+            "status": "completed",
+            "timestamp": "2026-07-10T10:01:00Z",
+            "attempt_id": "attempt-scene-1",
+            "human_approval_required": True,
+            "human_approved": True,
+            "cost_snapshot": {"total_spent_usd": 0, "budget_remaining_usd": 25},
+            "metadata": {
+                "approval_name": "Editorial Approval",
+                "approval_scope_hash": f"sha256:{'a' * 64}",
+            },
+            "artifacts": {
+                "scene_plan": {"version": "1.0", "scenes": []},
+                "editorial_package": {"version": "1.0", "package_id": "editorial-1"},
+            },
+        })
+
+        state = load_board_state(p)
+        stage = next(item for item in state["stages"] if item["name"] == "scene_plan")
+
+        assert stage["attempt_id"] == "attempt-scene-1"
+        assert stage["artifact_names"] == ["editorial_package", "scene_plan"]
+        assert stage["artifacts"]["editorial_package"]["package_id"] == "editorial-1"
+        assert stage["approval"] == {
+            "name": "Editorial Approval",
+            "status": "approved",
+            "scope_hash": f"sha256:{'a' * 64}",
+        }
+        assert stage["cost_snapshot"] == {
+            "total_spent_usd": 0,
+            "budget_remaining_usd": 25,
+        }
+        assert stage["history_entries"][0] == {
+            "status": "awaiting_human",
+            "timestamp": "2026-07-10T10:00:00Z",
+            "attempt_id": "attempt-scene-1",
+            "error": None,
+            "human_approval_required": True,
+            "human_approved": False,
+            "approval_name": "Editorial Approval",
+            "approval_scope_hash": f"sha256:{'a' * 64}",
+            "cost_snapshot": {"total_spent_usd": 0, "budget_remaining_usd": 25},
+            "artifact_names": ["editorial_package", "scene_plan"],
+        }
+        assert state["artifacts"]["editorial_package"]["package_id"] == "editorial-1"
+
+    def test_projects_checkpoint_failures_and_companion_artifacts(self, projects_root):
+        p = _make_project(projects_root, "studio--episode-failed")
+        _write(p / "project.json", {
+            "title": "Failed Studio Episode",
+            "pipeline_type": "generative-documentary",
+        })
+        _write(p / "checkpoint_compose.json", {
+            "stage": "compose",
+            "status": "failed",
+            "timestamp": "2026-07-10T11:00:00Z",
+            "attempt_id": "attempt-compose-1",
+            "human_approval_required": False,
+            "human_approved": False,
+            "error": "Technical Conformance failed; Release Approval is blocked",
+            "cost_snapshot": {"total_spent_usd": 0, "budget_remaining_usd": 25},
+            "artifacts": {
+                "render_report": {"version": "1.0", "output_path": "renders/final.mp4"},
+                "technical_conformance": {"version": "1.0", "status": "fail"},
+            },
+        })
+
+        state = load_board_state(p)
+        stage = next(item for item in state["stages"] if item["name"] == "compose")
+
+        assert stage["failures"] == [{
+            "timestamp": "2026-07-10T11:00:00Z",
+            "attempt_id": "attempt-compose-1",
+            "error": "Technical Conformance failed; Release Approval is blocked",
+        }]
+        assert stage["artifact_names"] == ["render_report", "technical_conformance"]
+        assert stage["artifacts"]["technical_conformance"]["status"] == "fail"
+        assert state["artifacts"]["technical_conformance"]["status"] == "fail"
+
+
 class TestFindingsFixes:
     """Regression tests for dogfood findings F-04/F-05."""
 

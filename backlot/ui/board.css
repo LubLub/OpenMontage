@@ -494,6 +494,21 @@ a.backlink:hover { color: var(--text-2); }
   background: var(--surface-2); border: 1px solid var(--border-soft); border-radius: 8px;
   padding: 12px 14px; overflow: auto; max-height: 420px; white-space: pre-wrap;
 }
+.checkpoint-audit { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.audit-card { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface-2); }
+.audit-card.failure { border-color: rgba(229,84,75,.35); background: var(--red-dim); }
+.audit-label, .audit-section-title { font-family: var(--mono); font-size: calc(9px * var(--fs-scale)); letter-spacing: .09em; color: var(--text-3); text-transform: uppercase; }
+.audit-value { font-size: calc(12px * var(--fs-scale)); color: var(--text-2); overflow-wrap: anywhere; }
+.approval-approved { color: var(--green); }
+.approval-pending, .approval-required { color: var(--amber); }
+.audit-detail { font-family: var(--mono); font-size: calc(9.5px * var(--fs-scale)); color: var(--text-3); overflow-wrap: anywhere; }
+.checkpoint-history { margin: 0 0 14px; }
+.checkpoint-history .audit-section-title { margin: 0 0 6px; }
+.checkpoint-version { display: grid; grid-template-columns: minmax(92px, auto) minmax(150px, auto) 1fr; gap: 8px 12px; align-items: baseline; padding: 7px 9px; border-top: 1px solid var(--border-soft); font-family: var(--mono); font-size: calc(9.5px * var(--fs-scale)); }
+.checkpoint-version:last-child { border-bottom: 1px solid var(--border-soft); }
+.checkpoint-version.failed { color: var(--red); }
+.version-status { font-weight: 700; text-transform: uppercase; }
+.version-time, .version-detail { color: var(--text-3); overflow-wrap: anywhere; }
 .gate-chip {
   font-family: var(--mono); font-size: calc(9.5px * var(--fs-scale)); letter-spacing: .08em;
   padding: 2px 8px; border-radius: 99px; border: 1px solid rgba(229,84,75,.45);

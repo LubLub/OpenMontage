@@ -131,18 +131,6 @@ function toggleDrawer(stageName) {
   render();
 }
 
-const STAGE_ARTIFACTS = {
-  research: ["research_brief"],
-  proposal: ["proposal_packet"],
-  idea: ["brief"],
-  script: ["script"],
-  scene_plan: ["scene_plan"],
-  assets: ["asset_manifest"],
-  edit: ["edit_decisions"],
-  compose: ["render_report", "final_review"],
-  publish: ["publish_log"],
-};
-
 function renderDrawer(s) {
   if (!selectedStage) return null;
   const st = s.stages.find((x) => x.name === selectedStage);
@@ -159,10 +147,74 @@ function renderDrawer(s) {
     ));
   }
 
-  const names = STAGE_ARTIFACTS[st.name] || [];
+  const audit = el("div", { class: "checkpoint-audit" });
+  if (st.approval) {
+    audit.append(el("div", { class: "audit-card" },
+      el("span", { class: "audit-label" }, st.approval.name || "Human Approval"),
+      el("b", { class: `audit-value approval-${st.approval.status || "required"}` }, st.approval.status || "required"),
+      st.approval.scope_hash
+        ? el("span", { class: "audit-detail", title: st.approval.scope_hash }, `scope ${st.approval.scope_hash.slice(0, 18)}…`)
+        : null,
+    ));
+  }
+  if (st.cost_snapshot) {
+    const spent = st.cost_snapshot.total_spent_usd;
+    const remaining = st.cost_snapshot.budget_remaining_usd;
+    audit.append(el("div", { class: "audit-card" },
+      el("span", { class: "audit-label" }, "Stage cost snapshot"),
+      el("b", { class: "audit-value" }, `${fmtMoney(spent)} spent`),
+      remaining != null ? el("span", { class: "audit-detail" }, `${fmtMoney(remaining)} remaining`) : null,
+    ));
+  }
+  if (st.error) {
+    audit.append(el("div", { class: "audit-card failure" },
+      el("span", { class: "audit-label" }, "Current failure"),
+      el("b", { class: "audit-value" }, st.error),
+      st.attempt_id ? el("span", { class: "audit-detail" }, `attempt ${st.attempt_id}`) : null,
+    ));
+  }
+  if (audit.childNodes.length) body.append(audit);
+
+  if ((st.failures || []).length) {
+    const failures = el("div", { class: "checkpoint-history failures" },
+      el("div", { class: "audit-section-title" }, "Failures"));
+    for (const failure of st.failures) {
+      failures.append(el("div", { class: "checkpoint-version failed" },
+        el("span", { class: "version-status" }, "failed"),
+        el("span", { class: "version-time" }, failure.timestamp || "time unavailable"),
+        failure.error ? el("span", { class: "version-detail" }, failure.error) : null,
+      ));
+    }
+    body.append(failures);
+  }
+
+  if ((st.history_entries || []).length) {
+    const history = el("div", { class: "checkpoint-history" },
+      el("div", { class: "audit-section-title" }, "Checkpoint history"));
+    for (const version of st.history_entries) {
+      const approval = version.human_approval_required
+        ? (version.human_approved ? "approved" : "approval pending")
+        : null;
+      history.append(el("div", { class: `checkpoint-version ${version.status || "unknown"}` },
+        el("span", { class: "version-status" }, version.status || "unknown"),
+        el("span", { class: "version-time" }, version.timestamp || "time unavailable"),
+        approval ? el("span", { class: "version-detail" }, approval) : null,
+        version.cost_snapshot
+          ? el("span", { class: "version-detail" }, `${fmtMoney(version.cost_snapshot.total_spent_usd)} spent`)
+          : null,
+        version.artifact_names && version.artifact_names.length
+          ? el("span", { class: "version-detail" }, version.artifact_names.join(", "))
+          : null,
+      ));
+    }
+    body.append(history);
+  }
+
+  const names = st.artifact_names || [];
+  const stageArtifacts = st.artifacts || {};
   let shown = false;
   for (const name of names) {
-    const artifact = s.artifacts[name];
+    const artifact = stageArtifacts[name];
     if (!artifact) continue;
     shown = true;
     body.append(
