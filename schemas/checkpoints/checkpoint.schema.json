@@ -14,7 +14,7 @@
     },
     "status": {
       "type": "string",
-      "enum": ["completed", "failed", "awaiting_human", "in_progress"]
+      "enum": ["completed", "failed", "awaiting_human", "in_progress", "superseded"]
     },
     "timestamp": { "type": "string", "format": "date-time" },
     "pipeline_type": { "type": "string", "description": "Pipeline manifest name" },
@@ -22,6 +22,57 @@
     "checkpoint_policy": { "type": "string", "enum": ["guided", "manual_all", "auto_noncreative"] },
     "human_approval_required": { "type": "boolean" },
     "human_approved": { "type": "boolean" },
+    "input_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "input_scope": {
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output_fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "attempt_id": { "type": "string", "minLength": 1 },
+    "supersession": {
+      "type": "object",
+      "required": [
+        "reason",
+        "previous_status",
+        "replacement_input_fingerprint",
+        "pending_recalculation",
+        "superseded_at"
+      ],
+      "properties": {
+        "reason": { "type": "string", "minLength": 1 },
+        "previous_status": {
+          "type": "string",
+          "enum": ["completed", "failed", "awaiting_human", "in_progress"]
+        },
+        "replacement_input_fingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^sha256:[0-9a-f]{64}$"
+        },
+        "pending_recalculation": { "type": "boolean" },
+        "superseded_at": { "type": "string", "format": "date-time" }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "replacement_input_fingerprint": { "type": "string" },
+            "pending_recalculation": { "const": false }
+          }
+        },
+        {
+          "properties": {
+            "replacement_input_fingerprint": { "type": "null" },
+            "pending_recalculation": { "const": true }
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
     "artifacts": {
       "type": "object",
       "description": "Map of artifact name to artifact data or file path",
@@ -42,5 +93,11 @@
     "error": { "type": "string" },
     "metadata": { "type": "object" }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "status": { "const": "superseded" } } },
+      "then": { "required": ["supersession"] }
+    }
+  ],
   "additionalProperties": false
 }

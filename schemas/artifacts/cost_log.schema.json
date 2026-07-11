@@ -24,7 +24,26 @@
           "reserved_usd": { "type": "number", "minimum": 0 },
           "actual_usd": { "type": "number", "minimum": 0 },
           "timestamp": { "type": "string", "format": "date-time" },
-          "details": { "type": "string" }
+          "details": { "type": "string" },
+          "operation_key": { "type": "string", "minLength": 1 },
+          "input_fingerprint": {
+            "type": "string",
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "attempt_id": { "type": "string", "minLength": 1 },
+          "provider_request_id": { "type": "string", "minLength": 1 },
+          "output_receipts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["path", "sha256"],
+              "properties": {
+                "path": { "type": "string", "minLength": 1 },
+                "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+              },
+              "additionalProperties": false
+            }
+          }
         },
         "additionalProperties": false
       }

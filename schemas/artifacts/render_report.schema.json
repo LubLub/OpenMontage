@@ -21,7 +21,8 @@
           "fps": { "type": "number" },
           "duration_seconds": { "type": "number", "minimum": 0 },
           "file_size_bytes": { "type": "integer" },
-          "platform_target": { "type": "string" }
+          "platform_target": { "type": "string" },
+          "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
         },
         "additionalProperties": false
       },

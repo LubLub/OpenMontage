@@ -7,6 +7,9 @@ checkpoints to resume pipelines and to present state at human checkpoints.
 from __future__ import annotations
 
 import json
+import os
+import stat
+import uuid
 from functools import lru_cache
 from datetime import datetime, timezone
 from pathlib import Path
@@ -165,8 +168,57 @@ def validate_checkpoint(checkpoint: dict[str, Any]) -> None:
         raise CheckpointValidationError(f"Checkpoint failed schema validation: {exc.message}") from exc
 
 
+def _validate_path_component(value: str, *, label: str) -> None:
+    if (
+        not isinstance(value, str)
+        or not value
+        or value in {".", ".."}
+        or "/" in value
+        or "\\" in value
+        or "\x00" in value
+        or Path(value).is_absolute()
+    ):
+        raise CheckpointValidationError(f"Unsafe checkpoint {label}: {value!r}")
+
+
+def _reject_symlink_components(path: Path, *, label: str) -> Path:
+    """Reject symlinks in every existing component without resolving through them."""
+    absolute = Path(os.path.abspath(path))
+    current = Path(absolute.anchor)
+    for component in absolute.parts[1:]:
+        current /= component
+        try:
+            component_stat = current.lstat()
+        except FileNotFoundError:
+            break
+        except OSError as exc:
+            raise CheckpointValidationError(
+                f"Unsafe checkpoint {label}: {path}"
+            ) from exc
+        if stat.S_ISLNK(component_stat.st_mode):
+            raise CheckpointValidationError(
+                f"Unsafe checkpoint {label} contains symlink traversal: {path}"
+            )
+    return absolute
+
+
+def _validated_project_directory(pipeline_dir: Path, project_id: str) -> Path:
+    _validate_path_component(project_id, label="project_id")
+    root = _reject_symlink_components(Path(pipeline_dir), label="pipeline root")
+    project_dir = _reject_symlink_components(
+        root / project_id,
+        label="project directory",
+    )
+    if project_dir.parent != root:
+        raise CheckpointValidationError(
+            f"Unsafe checkpoint project_id escapes pipeline root: {project_id!r}"
+        )
+    return project_dir
+
+
 def _checkpoint_path(pipeline_dir: Path, project_id: str, stage: str) -> Path:
-    return pipeline_dir / project_id / f"checkpoint_{stage}.json"
+    _validate_path_component(stage, label="stage")
+    return _validated_project_directory(pipeline_dir, project_id) / f"checkpoint_{stage}.json"
 
 
 def init_project(
@@ -268,16 +320,11 @@ def _archive_superseded_checkpoint(path: Path, stage: str) -> None:
     """
     if not path.exists():
         return
-    try:
-        with open(path) as f:
-            existing = json.load(f)
-    except (json.JSONDecodeError, OSError):
-        existing = {}
+    existing = _read_json_regular_file(path)
     if existing.get("status") == "in_progress":
         return
 
     try:
-        import shutil
         stamp = str(existing.get("timestamp", ""))
         safe_stamp = "".join(c for c in stamp if c.isalnum()) or f"{path.stat().st_mtime_ns}"
         history_dir = path.parent / HISTORY_DIRNAME
@@ -285,7 +332,9 @@ def _archive_superseded_checkpoint(path: Path, stage: str) -> None:
         target = history_dir / f"checkpoint_{stage}_{safe_stamp}.json"
         if target.exists():
             target = history_dir / f"checkpoint_{stage}_{safe_stamp}_{path.stat().st_mtime_ns}.json"
-        shutil.copyfile(path, target)
+        _write_durable_json(target, existing)
+    except CheckpointValidationError:
+        raise
     except OSError:
         import logging
         logging.getLogger(__name__).warning(
@@ -343,6 +392,10 @@ def write_checkpoint(
     cost_snapshot: Optional[dict] = None,
     error: Optional[str] = None,
     metadata: Optional[dict] = None,
+    input_fingerprint: Optional[str] = None,
+    input_scope: Optional[dict[str, Any]] = None,
+    output_fingerprint: Optional[str] = None,
+    attempt_id: Optional[str] = None,
 ) -> Path:
     """Write a checkpoint file for a pipeline stage."""
     # Backfill a missing pipeline_type from the project marker so that
@@ -420,6 +473,14 @@ def write_checkpoint(
         checkpoint["error"] = error
     if metadata is not None:
         checkpoint["metadata"] = metadata
+    if input_fingerprint is not None:
+        checkpoint["input_fingerprint"] = input_fingerprint
+    if input_scope is not None:
+        checkpoint["input_scope"] = input_scope
+    if output_fingerprint is not None:
+        checkpoint["output_fingerprint"] = output_fingerprint
+    if attempt_id is not None:
+        checkpoint["attempt_id"] = attempt_id
 
     # Merge decision_log: if this checkpoint carries new decisions,
     # append them to the project-level decision log file, then write the
@@ -451,16 +512,178 @@ def write_checkpoint(
     # unserializable metadata) can never leave the stage with a truncated
     # current checkpoint; then archive the superseded file and swap in the
     # new one atomically.
-    tmp_path = path.with_suffix(".json.tmp")
-    with open(tmp_path, "w") as f:
-        json.dump(checkpoint, f, indent=2)
     # Preserve run history: a superseded completed/awaiting_human checkpoint
     # is copied to history/ (stage versioning, gate audit trail, replay).
     _archive_superseded_checkpoint(path, stage)
-    import os
-    os.replace(tmp_path, path)
+    _write_durable_json(path, checkpoint)
 
     return path
+
+
+def _open_safe_directory(path: Path) -> int:
+    """Open a real directory without following a final symlink component."""
+    path.mkdir(parents=True, exist_ok=True)
+    try:
+        directory_stat = path.lstat()
+    except OSError as exc:
+        raise CheckpointValidationError(f"Unsafe checkpoint directory: {path}") from exc
+    if not stat.S_ISDIR(directory_stat.st_mode) or path.is_symlink():
+        raise CheckpointValidationError(f"Unsafe checkpoint directory: {path}")
+    directory_flag = getattr(os, "O_DIRECTORY", 0)
+    if not directory_flag:
+        # Windows does not expose durable directory descriptors. The caller
+        # still uses exclusive random temp files and rechecks this path.
+        return -1
+    flags = os.O_RDONLY | directory_flag | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise CheckpointValidationError(f"Unsafe checkpoint directory: {path}") from exc
+    file_stat = os.fstat(descriptor)
+    if not stat.S_ISDIR(file_stat.st_mode):
+        os.close(descriptor)
+        raise CheckpointValidationError(f"Unsafe checkpoint directory: {path}")
+    return descriptor
+
+
+def _fsync_directory_descriptor(descriptor: int) -> None:
+    """Flush directory metadata where the platform exposes that operation."""
+    if descriptor < 0 or not getattr(os, "O_DIRECTORY", 0):
+        return
+    os.fsync(descriptor)
+
+
+def _read_json_regular_file(path: Path) -> dict[str, Any]:
+    """Read JSON from one non-symlink, single-link regular file."""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        file_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise CheckpointValidationError(
+                f"Checkpoint is not a safe single-link regular file: {path}"
+            )
+        with os.fdopen(descriptor, encoding="utf-8") as handle:
+            descriptor = -1
+            document = json.load(handle)
+    except CheckpointValidationError:
+        raise
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise CheckpointValidationError(f"Checkpoint is unavailable or unsafe: {path}") from exc
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    if not isinstance(document, dict):
+        raise CheckpointValidationError(f"Checkpoint must be a JSON object: {path}")
+    return document
+
+
+def _write_durable_json(path: Path, document: dict[str, Any]) -> None:
+    """Atomically persist and flush a JSON document before returning."""
+    directory = _open_safe_directory(path.parent)
+    temporary = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_descriptor = -1
+    temporary_created = False
+    try:
+        if directory >= 0:
+            file_descriptor = os.open(temporary, flags, 0o600, dir_fd=directory)
+        else:
+            file_descriptor = os.open(path.parent / temporary, flags, 0o600)
+        temporary_created = True
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            file_descriptor = -1
+            json.dump(document, handle, indent=2)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if directory >= 0 and os.replace in os.supports_dir_fd:
+            os.replace(
+                temporary,
+                path.name,
+                src_dir_fd=directory,
+                dst_dir_fd=directory,
+            )
+        else:
+            # The temp was created exclusively in the already-validated target
+            # directory, so pathname replacement cannot follow a hostile temp.
+            os.replace(path.parent / temporary, path)
+        _fsync_directory_descriptor(directory)
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        if temporary_created:
+            try:
+                if directory >= 0:
+                    os.unlink(temporary, dir_fd=directory)
+                else:
+                    os.unlink(path.parent / temporary)
+            except FileNotFoundError:
+                pass
+        if directory >= 0:
+            os.close(directory)
+
+
+def supersede_checkpoint(
+    pipeline_dir: Path,
+    project_id: str,
+    stage: str,
+    *,
+    reason: str,
+    replacement_input_fingerprint: str | None,
+) -> Path:
+    """Durably archive an invalidated checkpoint before removing the current file.
+
+    The caller decides that a checkpoint is stale. This helper only performs the
+    structural transition and fails closed: an archive or validation failure
+    leaves the current checkpoint in place.
+    """
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValueError("Supersession reason must be a non-empty string")
+
+    current_path = _checkpoint_path(pipeline_dir, project_id, stage)
+    checkpoint = read_checkpoint(pipeline_dir, project_id, stage)
+    if checkpoint is None:
+        raise FileNotFoundError(f"Checkpoint not found: {current_path}")
+
+    superseded_at = datetime.now(timezone.utc).isoformat()
+    archived = dict(checkpoint)
+    archived["status"] = "superseded"
+    archived["supersession"] = {
+        "reason": reason.strip(),
+        "previous_status": checkpoint["status"],
+        "replacement_input_fingerprint": replacement_input_fingerprint,
+        "pending_recalculation": replacement_input_fingerprint is None,
+        "superseded_at": superseded_at,
+    }
+    validate_checkpoint(archived)
+
+    safe_stamp = "".join(character for character in superseded_at if character.isalnum())
+    history_path = (
+        current_path.parent
+        / HISTORY_DIRNAME
+        / f"checkpoint_{stage}_{safe_stamp}_{uuid.uuid4().hex[:12]}_superseded.json"
+    )
+    _write_durable_json(history_path, archived)
+
+    # Do not remove a checkpoint another writer replaced while the archive was
+    # being flushed. The durable audit record remains useful; current state wins.
+    current = read_checkpoint(pipeline_dir, project_id, stage)
+    if current != checkpoint:
+        raise RuntimeError("Current checkpoint changed while it was being superseded")
+    current_path.unlink()
+    directory = _open_safe_directory(current_path.parent)
+    try:
+        _fsync_directory_descriptor(directory)
+    finally:
+        if directory >= 0:
+            os.close(directory)
+    return history_path
 
 
 def read_checkpoint(
@@ -470,8 +693,7 @@ def read_checkpoint(
     path = _checkpoint_path(pipeline_dir, project_id, stage)
     if not path.exists():
         return None
-    with open(path) as f:
-        checkpoint = json.load(f)
+    checkpoint = _read_json_regular_file(path)
     validate_checkpoint(checkpoint)
     return checkpoint
 
@@ -480,22 +702,31 @@ def get_latest_checkpoint(
     pipeline_dir: Path, project_id: str
 ) -> Optional[dict[str, Any]]:
     """Find the most recent checkpoint for a project (by file mtime)."""
-    project_dir = pipeline_dir / project_id
+    project_dir = _validated_project_directory(pipeline_dir, project_id)
     if not project_dir.exists():
         return None
 
-    checkpoints = sorted(
-        project_dir.glob("checkpoint_*.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )
+    checkpoints_with_times: list[tuple[Path, float]] = []
+    for path in project_dir.glob("checkpoint_*.json"):
+        file_stat = path.lstat()
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise CheckpointValidationError(
+                f"Checkpoint is not a safe single-link regular file: {path}"
+            )
+        checkpoints_with_times.append((path, file_stat.st_mtime))
+    checkpoints = [
+        path
+        for path, _ in sorted(
+            checkpoints_with_times,
+            key=lambda item: item[1],
+            reverse=True,
+        )
+    ]
     if not checkpoints:
         return None
 
-    with open(checkpoints[0]) as f:
-        checkpoint = json.load(f)
-    validate_checkpoint(checkpoint)
-    return checkpoint
+    stage = checkpoints[0].name.removeprefix("checkpoint_").removesuffix(".json")
+    return read_checkpoint(pipeline_dir, project_id, stage)
 
 
 def get_completed_stages(

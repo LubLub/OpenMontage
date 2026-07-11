@@ -284,6 +284,55 @@ class TestSchemas:
     def test_video_analysis_brief_validates(self):
         validate_artifact("video_analysis_brief", sample_artifact("video_analysis_brief"))
 
+    def test_render_report_accepts_output_sha256(self):
+        report = sample_artifact("render_report")
+        report["outputs"][0]["sha256"] = "a" * 64
+        validate_artifact("render_report", report)
+
+    def test_proposal_accepts_project_relative_render_output_path(self):
+        proposal = sample_artifact("proposal_packet")
+        proposal["production_plan"]["render_output_path"] = "renders/final.mp4"
+        validate_artifact("proposal_packet", proposal)
+
+    @pytest.mark.parametrize(
+        "unsafe",
+        ["/tmp/final.mp4", "../final.mp4", "renders/../final.mp4", "C:\\final.mp4", "\\\\server\\share\\final.mp4"],
+    )
+    def test_proposal_rejects_unsafe_render_output_path(self, unsafe):
+        proposal = sample_artifact("proposal_packet")
+        proposal["production_plan"]["render_output_path"] = unsafe
+
+        with pytest.raises(Exception):
+            validate_artifact("proposal_packet", proposal)
+
+    def test_cost_log_accepts_resume_operation_metadata(self):
+        digest = "a" * 64
+        validate_artifact(
+            "cost_log",
+            {
+                "version": "1.0",
+                "entries": [
+                    {
+                        "id": "cost-1",
+                        "tool": "paid_fake",
+                        "operation": "hero-video",
+                        "status": "completed",
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "operation_key": "assets:hero-video:scene-3",
+                        "input_fingerprint": f"sha256:{digest}",
+                        "attempt_id": "attempt-assets-1",
+                        "provider_request_id": "provider-request-1",
+                        "output_receipts": [
+                            {
+                                "path": "assets/video/hero.mp4",
+                                "sha256": digest,
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+
 
 # ---- Checkpoint ----
 

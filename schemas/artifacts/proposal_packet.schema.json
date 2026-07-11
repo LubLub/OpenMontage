@@ -155,6 +155,12 @@
           "enum": ["remotion", "hyperframes", "ffmpeg"],
           "description": "Locked at proposal stage — the technical runtime that realizes renderer_family. remotion=React scene components, hyperframes=HTML/CSS/GSAP, ffmpeg=simple concat/trim. Must be explicit and auditable; silent swaps are forbidden."
         },
+        "render_output_path": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+",
+          "description": "Editorial-approved project-relative path for the composed render output."
+        },
         "composition_mode": {
           "type": "string",
           "enum": ["templated", "atelier"],
