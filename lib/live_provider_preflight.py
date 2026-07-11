@@ -120,6 +120,21 @@ def _probe_elevenlabs(
         )
         if not isinstance(payload, dict) or payload.get("voice_id") != voice_id:
             return _blocked(base, "voice_unavailable")
+        models = request_json(
+            "https://api.elevenlabs.io/v1/models",
+            {"xi-api-key": key},
+            30,
+        )
+        selected = next(
+            (
+                model
+                for model in models
+                if isinstance(model, dict) and model.get("model_id") == choice["model"]
+            ),
+            None,
+        ) if isinstance(models, list) else None
+        if not isinstance(selected, dict) or selected.get("can_do_text_to_speech") is not True:
+            return _blocked(base, "model_unavailable")
     except Exception:
         return _blocked(base, "live_probe_failed")
     return {**base, "status": "ready", "evidence_code": "auth_and_voice_verified"}

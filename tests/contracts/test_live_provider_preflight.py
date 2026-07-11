@@ -81,6 +81,14 @@ def _request_json(url: str, headers: dict[str, str], timeout: int) -> object:
         assert headers == {"xi-api-key": "eleven-secret"}
         assert url.endswith("voice-secret")
         return {"voice_id": "voice-secret", "name": "must-not-leak"}
+    if url == "https://api.elevenlabs.io/v1/models":
+        assert headers == {"xi-api-key": "eleven-secret"}
+        return [
+            {
+                "model_id": "eleven_multilingual_v2",
+                "can_do_text_to_speech": True,
+            }
+        ]
     raise AssertionError(url)
 
 
