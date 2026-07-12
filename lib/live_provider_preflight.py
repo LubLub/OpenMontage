@@ -48,6 +48,29 @@ def _request_json(url: str, headers: dict[str, str], timeout: int) -> object:
         raise RuntimeError("read-only provider probe failed") from exc
 
 
+def _post_json(
+    url: str,
+    headers: dict[str, str],
+    body: dict[str, Any],
+    timeout: int,
+) -> object:
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        opener = urllib.request.build_opener(_NoRedirect())
+        with opener.open(request, timeout=timeout) as response:
+            payload = response.read(4 * 1024 * 1024 + 1)
+            if len(payload) > 4 * 1024 * 1024:
+                raise RuntimeError("provider capability smoke response was too large")
+            return json.loads(payload)
+    except (OSError, UnicodeError, json.JSONDecodeError, urllib.error.HTTPError) as exc:
+        raise RuntimeError("provider capability smoke failed") from exc
+
+
 def _run_command(command: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
@@ -79,10 +102,150 @@ def _blocked(base: dict[str, Any], code: str) -> dict[str, Any]:
     return {**base, "status": "blocked", "reason_code": code}
 
 
+def _research_smoke_request(choice: Mapping[str, Any]) -> dict[str, Any]:
+    smoke = choice["smoke"]
+    return {
+        "model": choice["model"],
+        "input": smoke["input"],
+        "tools": [
+            {
+                "type": "web_search",
+                "search_context_size": smoke["search_context_size"],
+            }
+        ],
+        "tool_choice": "required",
+        "include": ["web_search_call.action.sources"],
+        "max_tool_calls": smoke["max_tool_calls"],
+        "max_output_tokens": smoke["max_output_tokens"],
+        "reasoning": {"effort": smoke["reasoning_effort"]},
+        "service_tier": smoke["service_tier"],
+        "store": False,
+    }
+
+
+def _research_smoke_hash(choice: Mapping[str, Any]) -> str:
+    return higgsfield_cli.spend_request_hash(
+        tool=choice["tool"],
+        model=choice["model"],
+        params=dict(choice["smoke"]),
+    )
+
+
+def _valid_research_smoke_authorization(
+    authorization: Any,
+    choice: Mapping[str, Any],
+) -> bool:
+    if not isinstance(authorization, Mapping):
+        return False
+    approval_id = authorization.get("approval_id")
+    maximum = authorization.get("max_usd")
+    expected_maximum = choice["smoke"]["max_usd"]
+    return (
+        isinstance(approval_id, str)
+        and bool(approval_id.strip())
+        and authorization.get("paid_actions_authorized") is True
+        and authorization.get("tool") == choice["tool"]
+        and authorization.get("model") == choice["model"]
+        and authorization.get("request_sha256") == _research_smoke_hash(choice)
+        and not isinstance(maximum, bool)
+        and isinstance(maximum, (int, float))
+        and math.isfinite(maximum)
+        and maximum > 0
+        and math.isclose(float(maximum), float(expected_maximum))
+    )
+
+
+def _valid_research_smoke_evidence(evidence: Any, choice: Mapping[str, Any]) -> bool:
+    if not isinstance(evidence, Mapping):
+        return False
+    if evidence.get("request_sha256") != _research_smoke_hash(choice):
+        return False
+    if not isinstance(evidence.get("response_id"), str) or not evidence["response_id"]:
+        return False
+    numeric_fields = (
+        "web_search_calls",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "estimated_cost_usd",
+        "max_usd",
+    )
+    if any(
+        isinstance(evidence.get(key), bool)
+        or not isinstance(evidence.get(key), (int, float))
+        or not math.isfinite(float(evidence[key]))
+        or float(evidence[key]) < 0
+        for key in numeric_fields
+    ):
+        return False
+    return (
+        evidence["web_search_calls"] == 1
+        and evidence["total_tokens"]
+        == evidence["input_tokens"] + evidence["output_tokens"]
+        and math.isclose(float(evidence["max_usd"]), float(choice["smoke"]["max_usd"]))
+        and float(evidence["estimated_cost_usd"]) <= float(evidence["max_usd"])
+    )
+
+
+def _research_smoke_evidence(
+    payload: object,
+    choice: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(payload, dict) or payload.get("status") != "completed":
+        return None
+    response_id = payload.get("id")
+    output = payload.get("output")
+    usage = payload.get("usage")
+    if (
+        not isinstance(response_id, str)
+        or not response_id
+        or not isinstance(output, list)
+        or not isinstance(usage, dict)
+    ):
+        return None
+    calls = [
+        item
+        for item in output
+        if isinstance(item, dict) and item.get("type") == "web_search_call"
+    ]
+    if len(calls) != 1 or calls[0].get("status") != "completed":
+        return None
+    token_fields = ("input_tokens", "output_tokens", "total_tokens")
+    if any(
+        isinstance(usage.get(key), bool)
+        or not isinstance(usage.get(key), int)
+        or usage[key] < 0
+        for key in token_fields
+    ):
+        return None
+    if usage["total_tokens"] != usage["input_tokens"] + usage["output_tokens"]:
+        return None
+    pricing = choice["smoke"]["pricing"]
+    estimated_cost = (
+        usage["input_tokens"] * pricing["input_usd_per_million_tokens"] / 1_000_000
+        + usage["output_tokens"] * pricing["output_usd_per_million_tokens"] / 1_000_000
+        + pricing["web_search_usd_per_call"]
+    )
+    evidence = {
+        "request_sha256": _research_smoke_hash(choice),
+        "response_id": response_id,
+        "web_search_calls": 1,
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        "total_tokens": usage["total_tokens"],
+        "estimated_cost_usd": estimated_cost,
+        "max_usd": float(choice["smoke"]["max_usd"]),
+    }
+    return evidence if _valid_research_smoke_evidence(evidence, choice) else None
+
+
 def _probe_openai(
     choice: Mapping[str, Any],
     environ: Mapping[str, str],
     request_json: Callable[[str, dict[str, str], int], object],
+    post_json: Callable[[str, dict[str, str], dict[str, Any], int], object],
+    authorization: Any,
+    prior_evidence: Any,
 ) -> dict[str, Any]:
     base = _base_result("research", choice)
     key = _env_value(choice.get("credential_ref"), environ)
@@ -104,11 +267,48 @@ def _probe_openai(
             return _blocked(base, "model_unavailable")
     except Exception:
         return _blocked(base, "live_probe_failed")
+    if prior_evidence is not None:
+        if not _valid_research_smoke_evidence(prior_evidence, choice):
+            return _blocked(base, "research_smoke_evidence_invalid")
+        return {
+            **base,
+            "status": "ready",
+            "evidence_code": "paid_web_search_execution_verified",
+            "research_smoke": dict(prior_evidence),
+        }
+    if authorization is None:
+        return {
+            **base,
+            "status": "blocked",
+            "evidence_code": "auth_and_model_verified",
+            "reason_code": "paid_web_search_smoke_required",
+        }
+    if not _valid_research_smoke_authorization(authorization, choice):
+        return _blocked(base, "research_smoke_authorization_invalid")
+    try:
+        payload = post_json(
+            "https://api.openai.com/v1/responses",
+            {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            },
+            _research_smoke_request(choice),
+            30,
+        )
+        evidence = _research_smoke_evidence(payload, choice)
+    except Exception:
+        evidence = None
+    if evidence is None:
+        return {
+            **_blocked(base, "paid_web_search_smoke_failed"),
+            "paid_action_executed": True,
+        }
     return {
         **base,
-        "status": "blocked",
-        "evidence_code": "auth_and_model_verified",
-        "reason_code": "paid_web_search_smoke_required",
+        "status": "ready",
+        "evidence_code": "paid_web_search_execution_verified",
+        "paid_action_executed": True,
+        "research_smoke": evidence,
     }
 
 
@@ -242,6 +442,58 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
             isinstance(item, str) and item for item in fallbacks
         ):
             raise ValueError(f"{capability}.fallbacks must be a string list")
+    smoke = plan["research"].get("smoke")
+    if not isinstance(smoke, Mapping) or set(smoke) != {
+        "input",
+        "max_tool_calls",
+        "max_output_tokens",
+        "reasoning_effort",
+        "search_context_size",
+        "service_tier",
+        "max_usd",
+        "pricing",
+    }:
+        raise ValueError("research.smoke must define the bounded capability request")
+    if not isinstance(smoke["input"], str) or not smoke["input"].strip():
+        raise ValueError("research.smoke.input must be a non-empty string")
+    if smoke["max_tool_calls"] != 1:
+        raise ValueError("research.smoke.max_tool_calls must be exactly one")
+    if (
+        isinstance(smoke["max_output_tokens"], bool)
+        or not isinstance(smoke["max_output_tokens"], int)
+        or not 1 <= smoke["max_output_tokens"] <= 1024
+    ):
+        raise ValueError("research.smoke.max_output_tokens is outside the safe bound")
+    if smoke["search_context_size"] != "low":
+        raise ValueError("research.smoke.search_context_size must be low")
+    if smoke["reasoning_effort"] != "low":
+        raise ValueError("research.smoke.reasoning_effort must be low")
+    if smoke["service_tier"] != "default":
+        raise ValueError("research.smoke.service_tier must be default")
+    maximum = smoke["max_usd"]
+    if (
+        isinstance(maximum, bool)
+        or not isinstance(maximum, (int, float))
+        or not math.isfinite(maximum)
+        or not 0 < maximum <= 1
+    ):
+        raise ValueError("research.smoke.max_usd is outside the safe bound")
+    pricing = smoke["pricing"]
+    pricing_fields = {
+        "input_usd_per_million_tokens",
+        "output_usd_per_million_tokens",
+        "web_search_usd_per_call",
+    }
+    if not isinstance(pricing, Mapping) or set(pricing) != pricing_fields:
+        raise ValueError("research.smoke.pricing must bind the approved rates")
+    if any(
+        isinstance(pricing[key], bool)
+        or not isinstance(pricing[key], (int, float))
+        or not math.isfinite(pricing[key])
+        or pricing[key] < 0
+        for key in pricing_fields
+    ):
+        raise ValueError("research.smoke.pricing contains an invalid rate")
 
 
 def run_live_provider_preflight(
@@ -249,14 +501,27 @@ def run_live_provider_preflight(
     *,
     environ: Mapping[str, str] | None = None,
     request_json: Callable[[str, dict[str, str], int], object] = _request_json,
+    post_json: Callable[
+        [str, dict[str, str], dict[str, Any], int], object
+    ] = _post_json,
     run_command: Callable[[list[str], int], Any] = _run_command,
     higgsfield_module: Any = higgsfield_cli,
+    research_smoke_authorization: Any = None,
+    research_smoke_evidence: Any = None,
 ) -> dict[str, Any]:
-    """Probe the fixed Rehearsal capability set without executing paid work."""
+    """Probe the fixed Rehearsal capabilities without paid production."""
     _validate_plan(plan)
     environment = os.environ if environ is None else environ
+    research = _probe_openai(
+        plan["research"],
+        environment,
+        request_json,
+        post_json,
+        research_smoke_authorization,
+        research_smoke_evidence,
+    )
     results = [
-        _probe_openai(plan["research"], environment, request_json),
+        research,
         _probe_elevenlabs(plan["narration"], environment, request_json),
         _probe_higgsfield(
             "image_generation", plan["image_generation"], higgsfield_module
@@ -274,8 +539,13 @@ def run_live_provider_preflight(
     )
     return {
         "schema_version": "1.0",
-        "probe_mode": "read_only_no_spend",
-        "paid_actions_executed": False,
+        "probe_mode": (
+            "capped_capability_validation"
+            if research.get("paid_action_executed") is True
+            else "read_only_no_spend"
+        ),
+        "paid_actions_executed": research.get("paid_action_executed") is True,
+        "paid_production_actions_executed": False,
         "ready": all(item["status"] == "ready" for item in results),
         "total_quoted_credits": float(total_credits),
         "capabilities": results,

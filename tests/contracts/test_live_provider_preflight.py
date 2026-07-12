@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from lib.higgsfield_cli import spend_request_hash
 from lib.live_provider_preflight import _NoRedirect, run_live_provider_preflight
 
 
@@ -17,6 +18,20 @@ def _plan() -> dict:
             "provider": "openai",
             "model": "gpt-5.4-mini",
             "credential_ref": "env:OPENAI_API_KEY",
+            "smoke": {
+                "input": "Find the date OpenAI was founded and cite one source.",
+                "max_tool_calls": 1,
+                "max_output_tokens": 256,
+                "reasoning_effort": "low",
+                "search_context_size": "low",
+                "service_tier": "default",
+                "max_usd": 0.25,
+                "pricing": {
+                    "input_usd_per_million_tokens": 0.75,
+                    "output_usd_per_million_tokens": 4.5,
+                    "web_search_usd_per_call": 0.01,
+                },
+            },
             "fallbacks": ["manual_primary_source_research"],
         },
         "narration": {
@@ -146,6 +161,182 @@ def test_preflight_probes_all_six_capabilities_and_defers_paid_research_smoke() 
     encoded = json.dumps(report)
     for secret in ("openai-secret", "eleven-secret", "voice-secret", "must-not-leak"):
         assert secret not in encoded
+
+
+def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> None:
+    requests: list[tuple[str, dict, dict, int]] = []
+
+    def post_json(url: str, headers: dict, body: dict, timeout: int) -> object:
+        requests.append((url, headers, body, timeout))
+        return {
+            "id": "resp_research_smoke_001",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "web_search_call",
+                    "status": "completed",
+                    "action": {
+                        "type": "search",
+                        "query": "must-not-be-persisted",
+                        "sources": [{"url": "https://must-not-be-persisted.invalid"}],
+                    },
+                },
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "must-not-leak"}],
+                },
+            ],
+            "usage": {"input_tokens": 8000, "output_tokens": 32, "total_tokens": 8032},
+        }
+
+    plan = _plan()
+    request_sha = spend_request_hash(
+        tool=plan["research"]["tool"],
+        model=plan["research"]["model"],
+        params=plan["research"]["smoke"],
+    )
+    report = run_live_provider_preflight(
+        plan,
+        environ={
+            "OPENAI_API_KEY": "openai-secret",
+            "ELEVENLABS_API_KEY": "eleven-secret",
+            "HISTORY_SLEEP_VOICE_ID": "voice-secret",
+        },
+        request_json=_request_json,
+        post_json=post_json,
+        run_command=_run_command,
+        higgsfield_module=FakeHiggsfield(),
+        research_smoke_authorization={
+            "approval_id": "history-sleep--rehearsal-001--research-smoke",
+            "paid_actions_authorized": True,
+            "tool": plan["research"]["tool"],
+            "model": plan["research"]["model"],
+            "request_sha256": request_sha,
+            "max_usd": 0.25,
+        },
+    )
+
+    assert report["ready"] is True
+    assert report["probe_mode"] == "capped_capability_validation"
+    assert report["paid_actions_executed"] is True
+    assert report["paid_production_actions_executed"] is False
+    research = report["capabilities"][0]
+    assert research["status"] == "ready"
+    assert research["evidence_code"] == "paid_web_search_execution_verified"
+    assert research["research_smoke"] == {
+        "request_sha256": request_sha,
+        "response_id": "resp_research_smoke_001",
+        "web_search_calls": 1,
+        "input_tokens": 8000,
+        "output_tokens": 32,
+        "total_tokens": 8032,
+        "estimated_cost_usd": pytest.approx(0.016144),
+        "max_usd": 0.25,
+    }
+    assert requests == [
+        (
+            "https://api.openai.com/v1/responses",
+            {
+                "Authorization": "Bearer openai-secret",
+                "Content-Type": "application/json",
+            },
+            {
+                "model": "gpt-5.4-mini",
+                "input": "Find the date OpenAI was founded and cite one source.",
+                "tools": [{"type": "web_search", "search_context_size": "low"}],
+                "tool_choice": "required",
+                "include": ["web_search_call.action.sources"],
+                "max_tool_calls": 1,
+                "max_output_tokens": 256,
+                "reasoning": {"effort": "low"},
+                "service_tier": "default",
+                "store": False,
+            },
+            30,
+        )
+    ]
+    encoded = json.dumps(report)
+    for forbidden in (
+        "openai-secret",
+        "must-not-leak",
+        "must-not-be-persisted",
+        "https://must-not-be-persisted.invalid",
+    ):
+        assert forbidden not in encoded
+
+
+def test_research_smoke_authorization_must_match_the_exact_bounded_request() -> None:
+    post_calls = 0
+
+    def post_json(*args, **kwargs):
+        nonlocal post_calls
+        post_calls += 1
+        raise AssertionError("mismatched authorization reached a paid request")
+
+    report = run_live_provider_preflight(
+        _plan(),
+        environ={
+            "OPENAI_API_KEY": "openai-secret",
+            "ELEVENLABS_API_KEY": "eleven-secret",
+            "HISTORY_SLEEP_VOICE_ID": "voice-secret",
+        },
+        request_json=_request_json,
+        post_json=post_json,
+        run_command=_run_command,
+        higgsfield_module=FakeHiggsfield(),
+        research_smoke_authorization={
+            "approval_id": "research-smoke",
+            "paid_actions_authorized": True,
+            "tool": "openai_responses_web_search",
+            "model": "gpt-5.4-mini",
+            "request_sha256": "sha256:stale",
+            "max_usd": 0.25,
+        },
+    )
+
+    assert post_calls == 0
+    assert report["paid_actions_executed"] is False
+    assert report["capabilities"][0]["reason_code"] == "research_smoke_authorization_invalid"
+
+
+def test_verified_research_smoke_evidence_is_reused_without_another_paid_call() -> None:
+    plan = _plan()
+    request_sha = spend_request_hash(
+        tool=plan["research"]["tool"],
+        model=plan["research"]["model"],
+        params=plan["research"]["smoke"],
+    )
+
+    def post_json(*args, **kwargs):
+        raise AssertionError("persisted evidence triggered another paid request")
+
+    evidence = {
+        "request_sha256": request_sha,
+        "response_id": "resp_research_smoke_001",
+        "web_search_calls": 1,
+        "input_tokens": 8000,
+        "output_tokens": 32,
+        "total_tokens": 8032,
+        "estimated_cost_usd": 0.016144,
+        "max_usd": 0.25,
+    }
+    report = run_live_provider_preflight(
+        plan,
+        environ={
+            "OPENAI_API_KEY": "openai-secret",
+            "ELEVENLABS_API_KEY": "eleven-secret",
+            "HISTORY_SLEEP_VOICE_ID": "voice-secret",
+        },
+        request_json=_request_json,
+        post_json=post_json,
+        run_command=_run_command,
+        higgsfield_module=FakeHiggsfield(),
+        research_smoke_evidence=evidence,
+    )
+
+    assert report["ready"] is True
+    assert report["paid_actions_executed"] is False
+    assert report["capabilities"][0]["research_smoke"] == evidence
 
 
 @pytest.mark.parametrize(
