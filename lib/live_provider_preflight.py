@@ -236,12 +236,58 @@ def _has_url_citation(payload: Mapping[str, Any]) -> bool:
     return False
 
 
-def _research_smoke_evidence(
+def _valid_research_smoke_pending(
+    pending: Any,
+    choice: Mapping[str, Any],
+) -> bool:
+    expected_keys = {
+        "request_sha256",
+        "response_id",
+        "web_search_calls",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "estimated_cost_usd",
+        "max_usd",
+        "provider_key_limit_usd",
+        "provider_key_remaining_before_usd",
+    }
+    if not isinstance(pending, Mapping) or set(pending) != expected_keys:
+        return False
+    if pending.get("request_sha256") != _research_smoke_hash(choice):
+        return False
+    if not isinstance(pending.get("response_id"), str) or not pending["response_id"]:
+        return False
+    numeric_fields = expected_keys - {"request_sha256", "response_id"}
+    if any(
+        isinstance(pending.get(key), bool)
+        or not isinstance(pending.get(key), (int, float))
+        or not math.isfinite(float(pending[key]))
+        or float(pending[key]) < 0
+        for key in numeric_fields
+    ):
+        return False
+    return (
+        pending["web_search_calls"] == 1
+        and pending["total_tokens"]
+        == pending["input_tokens"] + pending["output_tokens"]
+        and math.isclose(
+            float(pending["max_usd"]), float(choice["smoke"]["max_usd"])
+        )
+        and 0
+        < float(pending["provider_key_limit_usd"])
+        <= float(choice["smoke"]["key_limit_usd"])
+        and float(pending["provider_key_remaining_before_usd"])
+        <= float(pending["provider_key_limit_usd"])
+        and float(pending["estimated_cost_usd"]) <= float(pending["max_usd"])
+    )
+
+
+def _research_smoke_pending(
     payload: object,
     choice: Mapping[str, Any],
     provider_key_limit_usd: float,
     provider_key_remaining_before_usd: float,
-    provider_key_remaining_after_usd: float,
 ) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or payload.get("status") != "completed":
         return None
@@ -279,23 +325,13 @@ def _research_smoke_evidence(
         return None
     if usage["total_tokens"] != usage["input_tokens"] + usage["output_tokens"]:
         return None
-    actual_cost = (
-        provider_key_remaining_before_usd - provider_key_remaining_after_usd
-    )
-    if (
-        isinstance(actual_cost, bool)
-        or not isinstance(actual_cost, (int, float))
-        or not math.isfinite(actual_cost)
-        or actual_cost <= 0
-    ):
-        return None
     pricing = choice["smoke"]["pricing"]
     estimated_cost = (
         usage["input_tokens"] * pricing["input_usd_per_million_tokens"] / 1_000_000
         + usage["output_tokens"] * pricing["output_usd_per_million_tokens"] / 1_000_000
         + pricing["web_search_usd_per_call"]
     )
-    evidence = {
+    pending = {
         "request_sha256": _research_smoke_hash(choice),
         "response_id": response_id,
         "web_search_calls": 1,
@@ -303,13 +339,52 @@ def _research_smoke_evidence(
         "output_tokens": usage["output_tokens"],
         "total_tokens": usage["total_tokens"],
         "estimated_cost_usd": estimated_cost,
-        "actual_cost_usd": float(actual_cost),
         "max_usd": float(choice["smoke"]["max_usd"]),
         "provider_key_limit_usd": provider_key_limit_usd,
         "provider_key_remaining_before_usd": provider_key_remaining_before_usd,
+    }
+    return pending if _valid_research_smoke_pending(pending, choice) else None
+
+
+def _research_smoke_evidence_from_pending(
+    pending: Mapping[str, Any],
+    choice: Mapping[str, Any],
+    provider_key_remaining_after_usd: float,
+) -> dict[str, Any] | None:
+    if not _valid_research_smoke_pending(pending, choice):
+        return None
+    before = float(pending["provider_key_remaining_before_usd"])
+    actual_cost = before - provider_key_remaining_after_usd
+    if not math.isfinite(actual_cost) or actual_cost <= 0:
+        return None
+    evidence = {
+        **dict(pending),
+        "actual_cost_usd": actual_cost,
         "provider_key_remaining_after_usd": provider_key_remaining_after_usd,
     }
     return evidence if _valid_research_smoke_evidence(evidence, choice) else None
+
+
+def _research_smoke_evidence(
+    payload: object,
+    choice: Mapping[str, Any],
+    provider_key_limit_usd: float,
+    provider_key_remaining_before_usd: float,
+    provider_key_remaining_after_usd: float,
+) -> dict[str, Any] | None:
+    pending = _research_smoke_pending(
+        payload,
+        choice,
+        provider_key_limit_usd,
+        provider_key_remaining_before_usd,
+    )
+    if pending is None:
+        return None
+    return _research_smoke_evidence_from_pending(
+        pending,
+        choice,
+        provider_key_remaining_after_usd,
+    )
 
 
 def _probe_openrouter(
@@ -319,6 +394,7 @@ def _probe_openrouter(
     post_json: Callable[[str, dict[str, str], dict[str, Any], int], object],
     authorization: Any,
     prior_evidence: Any,
+    prior_pending: Any,
 ) -> dict[str, Any]:
     base = _base_result("research", choice)
     key = _env_value(choice.get("credential_ref"), environ)
@@ -376,6 +452,30 @@ def _probe_openrouter(
             "evidence_code": "paid_web_search_execution_verified",
             "research_smoke": dict(prior_evidence),
         }
+    if prior_pending is not None:
+        if not _valid_research_smoke_pending(prior_pending, choice):
+            return _blocked(base, "research_smoke_pending_invalid")
+        pending_before = float(prior_pending["provider_key_remaining_before_usd"])
+        if float(remaining) > pending_before and not math.isclose(
+            float(remaining), pending_before
+        ):
+            return _blocked(base, "provider_key_ledger_invalid")
+        evidence = _research_smoke_evidence_from_pending(
+            prior_pending,
+            choice,
+            float(remaining),
+        )
+        if evidence is None:
+            return {
+                **_blocked(base, "provider_key_ledger_pending"),
+                "research_smoke_pending": dict(prior_pending),
+            }
+        return {
+            **base,
+            "status": "ready",
+            "evidence_code": "paid_web_search_execution_verified",
+            "research_smoke": evidence,
+        }
     if authorization is None:
         return {
             **base,
@@ -385,6 +485,9 @@ def _probe_openrouter(
         }
     if not _valid_research_smoke_authorization(authorization, choice):
         return _blocked(base, "research_smoke_authorization_invalid")
+    pending = None
+    after_remaining = None
+    evidence = None
     try:
         payload = post_json(
             "https://openrouter.ai/api/v1/responses",
@@ -408,6 +511,12 @@ def _probe_openrouter(
             if isinstance(after_data, Mapping)
             else None
         )
+        pending = _research_smoke_pending(
+            payload,
+            choice,
+            float(provider_limit),
+            float(remaining),
+        )
         if (
             isinstance(after_remaining, bool)
             or not isinstance(after_remaining, (int, float))
@@ -416,16 +525,26 @@ def _probe_openrouter(
         ):
             evidence = None
         else:
-            evidence = _research_smoke_evidence(
-                payload,
+            evidence = _research_smoke_evidence_from_pending(
+                pending,
                 choice,
-                float(provider_limit),
-                float(remaining),
                 float(after_remaining),
-            )
+            ) if pending is not None else None
     except Exception:
+        pending = None
         evidence = None
     if evidence is None:
+        if (
+            pending is not None
+            and isinstance(after_remaining, (int, float))
+            and not isinstance(after_remaining, bool)
+            and math.isclose(float(after_remaining), float(remaining))
+        ):
+            return {
+                **_blocked(base, "provider_key_ledger_pending"),
+                "paid_action_executed": True,
+                "research_smoke_pending": pending,
+            }
         return {
             **_blocked(base, "paid_web_search_execution_unverified"),
             "paid_action_executed": True,
@@ -652,6 +771,7 @@ def run_live_provider_preflight(
     higgsfield_module: Any = higgsfield_cli,
     research_smoke_authorization: Any = None,
     research_smoke_evidence: Any = None,
+    research_smoke_pending: Any = None,
 ) -> dict[str, Any]:
     """Probe the fixed Rehearsal capabilities without paid production."""
     _validate_plan(plan)
@@ -663,6 +783,7 @@ def run_live_provider_preflight(
         post_json,
         research_smoke_authorization,
         research_smoke_evidence,
+        research_smoke_pending,
     )
     results = [
         research,

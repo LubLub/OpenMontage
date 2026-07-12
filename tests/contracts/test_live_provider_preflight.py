@@ -641,3 +641,109 @@ def test_research_smoke_derives_actual_cost_from_provider_key_balance() -> None:
     assert evidence["actual_cost_usd"] == pytest.approx(0.01024)
     assert evidence["provider_key_remaining_before_usd"] == 0.25
     assert evidence["provider_key_remaining_after_usd"] == 0.23976
+
+
+def test_research_smoke_reconciles_late_provider_ledger_without_replay() -> None:
+    plan = _plan()
+    request_sha = spend_request_hash(
+        tool=plan["research"]["tool"],
+        model=plan["research"]["model"],
+        params=plan["research"]["smoke"],
+    )
+
+    def post_json(*args, **kwargs) -> object:
+        return {
+            "id": "resp_research_smoke_pending",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "must-not-persist",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://must-not-persist.invalid",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "total_tokens": 110,
+            },
+        }
+
+    pending_report = run_live_provider_preflight(
+        plan,
+        environ={
+            "OPENROUTER_API_KEY": "openrouter-secret",
+            "ELEVENLABS_API_KEY": "eleven-secret",
+            "HISTORY_SLEEP_VOICE_ID": "voice-secret",
+        },
+        request_json=_request_json,
+        post_json=post_json,
+        run_command=_run_command,
+        higgsfield_module=FakeHiggsfield(),
+        research_smoke_authorization={
+            "approval_id": "history-sleep--rehearsal-001--research-smoke",
+            "paid_actions_authorized": True,
+            "tool": plan["research"]["tool"],
+            "model": plan["research"]["model"],
+            "request_sha256": request_sha,
+            "max_usd": 0.25,
+        },
+    )
+
+    assert pending_report["ready"] is False
+    assert pending_report["paid_actions_executed"] is True
+    research = pending_report["capabilities"][0]
+    assert research["reason_code"] == "provider_key_ledger_pending"
+    pending = research["research_smoke_pending"]
+    assert pending == {
+        "request_sha256": request_sha,
+        "response_id": "resp_research_smoke_pending",
+        "web_search_calls": 1,
+        "input_tokens": 100,
+        "output_tokens": 10,
+        "total_tokens": 110,
+        "estimated_cost_usd": pytest.approx(0.00524),
+        "max_usd": 0.25,
+        "provider_key_limit_usd": 0.25,
+        "provider_key_remaining_before_usd": 0.25,
+    }
+
+    def reconciled_request_json(
+        url: str, headers: dict[str, str], timeout: int
+    ) -> object:
+        if url == "https://openrouter.ai/api/v1/key":
+            return {"data": {"limit": 0.25, "limit_remaining": 0.23976}}
+        return _request_json(url, headers, timeout)
+
+    def no_replay(*args, **kwargs):
+        raise AssertionError("late ledger reconciliation replayed the paid request")
+
+    reconciled = run_live_provider_preflight(
+        plan,
+        environ={
+            "OPENROUTER_API_KEY": "openrouter-secret",
+            "ELEVENLABS_API_KEY": "eleven-secret",
+            "HISTORY_SLEEP_VOICE_ID": "voice-secret",
+        },
+        request_json=reconciled_request_json,
+        post_json=no_replay,
+        run_command=_run_command,
+        higgsfield_module=FakeHiggsfield(),
+        research_smoke_pending=pending,
+    )
+
+    assert reconciled["ready"] is True
+    assert reconciled["paid_actions_executed"] is False
+    evidence = reconciled["capabilities"][0]["research_smoke"]
+    assert evidence["actual_cost_usd"] == pytest.approx(0.01024)
+    assert evidence["provider_key_remaining_after_usd"] == 0.23976
