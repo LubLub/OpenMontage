@@ -1,8 +1,9 @@
-"""Read-only production-provider probes for a Studio Rehearsal.
+"""Production-provider probes for a Studio Rehearsal.
 
 This module deliberately has no production execution seam.  It can authenticate
-read-only provider endpoints, request Higgsfield's free credit quotes, and check
-the local FFmpeg runtime.  It never generates media or records spend.
+read-only provider endpoints, request Higgsfield's free credit quotes, check
+the local FFmpeg runtime, and—only with bound authorization—run one capped
+research web-search smoke. It never generates production media.
 """
 
 from __future__ import annotations
@@ -109,16 +110,18 @@ def _research_smoke_request(choice: Mapping[str, Any]) -> dict[str, Any]:
         "input": smoke["input"],
         "tools": [
             {
-                "type": "web_search",
-                "search_context_size": smoke["search_context_size"],
+                "type": "openrouter:web_search",
+                "parameters": {
+                    "engine": smoke["search_engine"],
+                    "max_results": smoke["max_results"],
+                    "max_total_results": smoke["max_total_results"],
+                    "max_characters": smoke["max_characters"],
+                },
             }
         ],
         "tool_choice": "required",
-        "include": ["web_search_call.action.sources"],
-        "max_tool_calls": smoke["max_tool_calls"],
         "max_output_tokens": smoke["max_output_tokens"],
         "reasoning": {"effort": smoke["reasoning_effort"]},
-        "service_tier": smoke["service_tier"],
         "store": False,
     }
 
@@ -169,6 +172,7 @@ def _valid_research_smoke_evidence(evidence: Any, choice: Mapping[str, Any]) -> 
         "total_tokens",
         "estimated_cost_usd",
         "max_usd",
+        "provider_key_limit_usd",
     )
     if any(
         isinstance(evidence.get(key), bool)
@@ -183,6 +187,9 @@ def _valid_research_smoke_evidence(evidence: Any, choice: Mapping[str, Any]) -> 
         and evidence["total_tokens"]
         == evidence["input_tokens"] + evidence["output_tokens"]
         and math.isclose(float(evidence["max_usd"]), float(choice["smoke"]["max_usd"]))
+        and 0
+        < float(evidence["provider_key_limit_usd"])
+        <= float(choice["smoke"]["key_limit_usd"])
         and float(evidence["estimated_cost_usd"]) <= float(evidence["max_usd"])
     )
 
@@ -190,25 +197,30 @@ def _valid_research_smoke_evidence(evidence: Any, choice: Mapping[str, Any]) -> 
 def _research_smoke_evidence(
     payload: object,
     choice: Mapping[str, Any],
+    provider_key_limit_usd: float,
 ) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or payload.get("status") != "completed":
         return None
     response_id = payload.get("id")
-    output = payload.get("output")
     usage = payload.get("usage")
     if (
         not isinstance(response_id, str)
         or not response_id
-        or not isinstance(output, list)
         or not isinstance(usage, dict)
     ):
         return None
-    calls = [
-        item
-        for item in output
-        if isinstance(item, dict) and item.get("type") == "web_search_call"
-    ]
-    if len(calls) != 1 or calls[0].get("status") != "completed":
+    server_tool_use = usage.get("server_tool_use")
+    web_search_requests = (
+        server_tool_use.get("web_search_requests")
+        if isinstance(server_tool_use, dict)
+        else None
+    )
+    if (
+        not isinstance(server_tool_use, dict)
+        or isinstance(web_search_requests, bool)
+        or not isinstance(web_search_requests, int)
+        or web_search_requests != 1
+    ):
         return None
     token_fields = ("input_tokens", "output_tokens", "total_tokens")
     if any(
@@ -235,11 +247,12 @@ def _research_smoke_evidence(
         "total_tokens": usage["total_tokens"],
         "estimated_cost_usd": estimated_cost,
         "max_usd": float(choice["smoke"]["max_usd"]),
+        "provider_key_limit_usd": provider_key_limit_usd,
     }
     return evidence if _valid_research_smoke_evidence(evidence, choice) else None
 
 
-def _probe_openai(
+def _probe_openrouter(
     choice: Mapping[str, Any],
     environ: Mapping[str, str],
     request_json: Callable[[str, dict[str, str], int], object],
@@ -252,8 +265,35 @@ def _probe_openai(
     if key is None:
         return _blocked(base, "credential_missing")
     try:
+        key_payload = request_json(
+            "https://openrouter.ai/api/v1/key",
+            {"Authorization": f"Bearer {key}"},
+            30,
+        )
+        key_data = key_payload.get("data") if isinstance(key_payload, dict) else None
+        if not isinstance(key_data, Mapping) or "limit" not in key_data:
+            return _blocked(base, "provider_key_limit_missing")
+        provider_limit = key_data.get("limit")
+        if (
+            isinstance(provider_limit, bool)
+            or not isinstance(provider_limit, (int, float))
+            or not math.isfinite(provider_limit)
+            or provider_limit <= 0
+        ):
+            return _blocked(base, "provider_key_limit_missing")
+        if provider_limit > float(choice["smoke"]["key_limit_usd"]):
+            return _blocked(base, "provider_key_limit_exceeded")
+        remaining = key_data.get("limit_remaining")
+        if (
+            isinstance(remaining, bool)
+            or not isinstance(remaining, (int, float))
+            or not math.isfinite(remaining)
+        ):
+            return _blocked(base, "provider_key_budget_unverified")
+        if remaining <= 0:
+            return _blocked(base, "provider_key_budget_exhausted")
         payload = request_json(
-            "https://api.openai.com/v1/models",
+            "https://openrouter.ai/api/v1/models",
             {"Authorization": f"Bearer {key}"},
             30,
         )
@@ -287,7 +327,7 @@ def _probe_openai(
         return _blocked(base, "research_smoke_authorization_invalid")
     try:
         payload = post_json(
-            "https://api.openai.com/v1/responses",
+            "https://openrouter.ai/api/v1/responses",
             {
                 "Authorization": f"Bearer {key}",
                 "Content-Type": "application/json",
@@ -295,12 +335,12 @@ def _probe_openai(
             _research_smoke_request(choice),
             30,
         )
-        evidence = _research_smoke_evidence(payload, choice)
+        evidence = _research_smoke_evidence(payload, choice, float(provider_limit))
     except Exception:
         evidence = None
     if evidence is None:
         return {
-            **_blocked(base, "paid_web_search_smoke_failed"),
+            **_blocked(base, "paid_web_search_execution_unverified"),
             "paid_action_executed": True,
         }
     return {
@@ -445,31 +485,37 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
     smoke = plan["research"].get("smoke")
     if not isinstance(smoke, Mapping) or set(smoke) != {
         "input",
-        "max_tool_calls",
         "max_output_tokens",
         "reasoning_effort",
-        "search_context_size",
-        "service_tier",
+        "search_engine",
+        "max_results",
+        "max_total_results",
+        "max_characters",
         "max_usd",
+        "key_limit_usd",
         "pricing",
     }:
         raise ValueError("research.smoke must define the bounded capability request")
     if not isinstance(smoke["input"], str) or not smoke["input"].strip():
         raise ValueError("research.smoke.input must be a non-empty string")
-    if smoke["max_tool_calls"] != 1:
-        raise ValueError("research.smoke.max_tool_calls must be exactly one")
     if (
         isinstance(smoke["max_output_tokens"], bool)
         or not isinstance(smoke["max_output_tokens"], int)
         or not 1 <= smoke["max_output_tokens"] <= 1024
     ):
         raise ValueError("research.smoke.max_output_tokens is outside the safe bound")
-    if smoke["search_context_size"] != "low":
-        raise ValueError("research.smoke.search_context_size must be low")
+    if smoke["search_engine"] != "exa":
+        raise ValueError("research.smoke.search_engine must be exa")
+    if smoke["max_results"] != 1 or smoke["max_total_results"] != 1:
+        raise ValueError("research.smoke search results must be exactly one")
+    if (
+        isinstance(smoke["max_characters"], bool)
+        or not isinstance(smoke["max_characters"], int)
+        or not 1 <= smoke["max_characters"] <= 5_000
+    ):
+        raise ValueError("research.smoke.max_characters is outside the safe bound")
     if smoke["reasoning_effort"] != "low":
         raise ValueError("research.smoke.reasoning_effort must be low")
-    if smoke["service_tier"] != "default":
-        raise ValueError("research.smoke.service_tier must be default")
     maximum = smoke["max_usd"]
     if (
         isinstance(maximum, bool)
@@ -478,6 +524,14 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
         or not 0 < maximum <= 1
     ):
         raise ValueError("research.smoke.max_usd is outside the safe bound")
+    key_limit = smoke["key_limit_usd"]
+    if (
+        isinstance(key_limit, bool)
+        or not isinstance(key_limit, (int, float))
+        or not math.isfinite(key_limit)
+        or not 0 < key_limit <= maximum
+    ):
+        raise ValueError("research.smoke.key_limit_usd is outside the safe bound")
     pricing = smoke["pricing"]
     pricing_fields = {
         "input_usd_per_million_tokens",
@@ -512,7 +566,7 @@ def run_live_provider_preflight(
     """Probe the fixed Rehearsal capabilities without paid production."""
     _validate_plan(plan)
     environment = os.environ if environ is None else environ
-    research = _probe_openai(
+    research = _probe_openrouter(
         plan["research"],
         environment,
         request_json,

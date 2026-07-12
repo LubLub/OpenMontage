@@ -14,22 +14,24 @@ from lib.live_provider_preflight import _NoRedirect, run_live_provider_preflight
 def _plan() -> dict:
     return {
         "research": {
-            "tool": "openai_responses_web_search",
-            "provider": "openai",
-            "model": "gpt-5.4-mini",
-            "credential_ref": "env:OPENAI_API_KEY",
+            "tool": "openrouter_responses_web_search",
+            "provider": "openrouter",
+            "model": "google/gemini-3.5-flash",
+            "credential_ref": "env:OPENROUTER_API_KEY",
             "smoke": {
-                "input": "Find the date OpenAI was founded and cite one source.",
-                "max_tool_calls": 1,
+                "input": "Find the date the World Wide Web was invented and cite one source.",
                 "max_output_tokens": 256,
                 "reasoning_effort": "low",
-                "search_context_size": "low",
-                "service_tier": "default",
+                "search_engine": "exa",
+                "max_results": 1,
+                "max_total_results": 1,
+                "max_characters": 2000,
                 "max_usd": 0.25,
+                "key_limit_usd": 0.25,
                 "pricing": {
-                    "input_usd_per_million_tokens": 0.75,
-                    "output_usd_per_million_tokens": 4.5,
-                    "web_search_usd_per_call": 0.01,
+                    "input_usd_per_million_tokens": 1.5,
+                    "output_usd_per_million_tokens": 9.0,
+                    "web_search_usd_per_call": 0.005,
                 },
             },
             "fallbacks": ["manual_primary_source_research"],
@@ -90,9 +92,12 @@ class FakeHiggsfield:
 
 def _request_json(url: str, headers: dict[str, str], timeout: int) -> object:
     assert timeout <= 30
-    if url == "https://api.openai.com/v1/models":
-        assert headers == {"Authorization": "Bearer openai-secret"}
-        return {"data": [{"id": "gpt-5.4-mini"}]}
+    if url == "https://openrouter.ai/api/v1/key":
+        assert headers == {"Authorization": "Bearer openrouter-secret"}
+        return {"data": {"limit": 0.25, "limit_remaining": 0.25}}
+    if url == "https://openrouter.ai/api/v1/models":
+        assert headers == {"Authorization": "Bearer openrouter-secret"}
+        return {"data": [{"id": "google/gemini-3.5-flash"}]}
     if url.startswith("https://api.elevenlabs.io/v1/voices/"):
         assert headers == {"xi-api-key": "eleven-secret"}
         assert url.endswith("voice-secret")
@@ -125,7 +130,7 @@ def test_preflight_probes_all_six_capabilities_and_defers_paid_research_smoke() 
     report = run_live_provider_preflight(
         _plan(),
         environ={
-            "OPENAI_API_KEY": "openai-secret",
+            "OPENROUTER_API_KEY": "openrouter-secret",
             "ELEVENLABS_API_KEY": "eleven-secret",
             "HISTORY_SLEEP_VOICE_ID": "voice-secret",
         },
@@ -159,7 +164,7 @@ def test_preflight_probes_all_six_capabilities_and_defers_paid_research_smoke() 
         ("generate", "cost", "kling3_0", {"prompt": "Rehearsal motion", "duration": 5}),
     ]
     encoded = json.dumps(report)
-    for secret in ("openai-secret", "eleven-secret", "voice-secret", "must-not-leak"):
+    for secret in ("openrouter-secret", "eleven-secret", "voice-secret", "must-not-leak"):
         assert secret not in encoded
 
 
@@ -186,7 +191,12 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
                     "content": [{"type": "output_text", "text": "must-not-leak"}],
                 },
             ],
-            "usage": {"input_tokens": 8000, "output_tokens": 32, "total_tokens": 8032},
+            "usage": {
+                "input_tokens": 8000,
+                "output_tokens": 32,
+                "total_tokens": 8032,
+                "server_tool_use": {"web_search_requests": 1},
+            },
         }
 
     plan = _plan()
@@ -198,7 +208,7 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
     report = run_live_provider_preflight(
         plan,
         environ={
-            "OPENAI_API_KEY": "openai-secret",
+            "OPENROUTER_API_KEY": "openrouter-secret",
             "ELEVENLABS_API_KEY": "eleven-secret",
             "HISTORY_SLEEP_VOICE_ID": "voice-secret",
         },
@@ -230,26 +240,34 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
         "input_tokens": 8000,
         "output_tokens": 32,
         "total_tokens": 8032,
-        "estimated_cost_usd": pytest.approx(0.016144),
+        "estimated_cost_usd": pytest.approx(0.017288),
         "max_usd": 0.25,
+        "provider_key_limit_usd": 0.25,
     }
     assert requests == [
         (
-            "https://api.openai.com/v1/responses",
+            "https://openrouter.ai/api/v1/responses",
             {
-                "Authorization": "Bearer openai-secret",
+                "Authorization": "Bearer openrouter-secret",
                 "Content-Type": "application/json",
             },
             {
-                "model": "gpt-5.4-mini",
-                "input": "Find the date OpenAI was founded and cite one source.",
-                "tools": [{"type": "web_search", "search_context_size": "low"}],
+                "model": "google/gemini-3.5-flash",
+                "input": "Find the date the World Wide Web was invented and cite one source.",
+                "tools": [
+                    {
+                        "type": "openrouter:web_search",
+                        "parameters": {
+                            "engine": "exa",
+                            "max_results": 1,
+                            "max_total_results": 1,
+                            "max_characters": 2000,
+                        },
+                    }
+                ],
                 "tool_choice": "required",
-                "include": ["web_search_call.action.sources"],
-                "max_tool_calls": 1,
                 "max_output_tokens": 256,
                 "reasoning": {"effort": "low"},
-                "service_tier": "default",
                 "store": False,
             },
             30,
@@ -257,7 +275,7 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
     ]
     encoded = json.dumps(report)
     for forbidden in (
-        "openai-secret",
+        "openrouter-secret",
         "must-not-leak",
         "must-not-be-persisted",
         "https://must-not-be-persisted.invalid",
@@ -276,7 +294,7 @@ def test_research_smoke_authorization_must_match_the_exact_bounded_request() -> 
     report = run_live_provider_preflight(
         _plan(),
         environ={
-            "OPENAI_API_KEY": "openai-secret",
+            "OPENROUTER_API_KEY": "openrouter-secret",
             "ELEVENLABS_API_KEY": "eleven-secret",
             "HISTORY_SLEEP_VOICE_ID": "voice-secret",
         },
@@ -287,8 +305,8 @@ def test_research_smoke_authorization_must_match_the_exact_bounded_request() -> 
         research_smoke_authorization={
             "approval_id": "research-smoke",
             "paid_actions_authorized": True,
-            "tool": "openai_responses_web_search",
-            "model": "gpt-5.4-mini",
+            "tool": "openrouter_responses_web_search",
+            "model": "google/gemini-3.5-flash",
             "request_sha256": "sha256:stale",
             "max_usd": 0.25,
         },
@@ -317,13 +335,14 @@ def test_verified_research_smoke_evidence_is_reused_without_another_paid_call() 
         "input_tokens": 8000,
         "output_tokens": 32,
         "total_tokens": 8032,
-        "estimated_cost_usd": 0.016144,
+        "estimated_cost_usd": 0.017288,
         "max_usd": 0.25,
+        "provider_key_limit_usd": 0.25,
     }
     report = run_live_provider_preflight(
         plan,
         environ={
-            "OPENAI_API_KEY": "openai-secret",
+            "OPENROUTER_API_KEY": "openrouter-secret",
             "ELEVENLABS_API_KEY": "eleven-secret",
             "HISTORY_SLEEP_VOICE_ID": "voice-secret",
         },
@@ -342,7 +361,7 @@ def test_verified_research_smoke_evidence_is_reused_without_another_paid_call() 
 @pytest.mark.parametrize(
     ("missing", "expected_code"),
     [
-        ("OPENAI_API_KEY", "credential_missing"),
+        ("OPENROUTER_API_KEY", "credential_missing"),
         ("ELEVENLABS_API_KEY", "credential_missing"),
         ("HISTORY_SLEEP_VOICE_ID", "credential_missing"),
     ],
@@ -351,7 +370,7 @@ def test_missing_secret_reference_blocks_without_exposing_names_or_values(
     missing: str, expected_code: str
 ) -> None:
     env = {
-        "OPENAI_API_KEY": "openai-secret",
+        "OPENROUTER_API_KEY": "openrouter-secret",
         "ELEVENLABS_API_KEY": "eleven-secret",
         "HISTORY_SLEEP_VOICE_ID": "voice-secret",
     }
@@ -377,7 +396,7 @@ def test_provider_failures_are_redacted_and_block_approval() -> None:
     report = run_live_provider_preflight(
         _plan(),
         environ={
-            "OPENAI_API_KEY": "openai-secret",
+            "OPENROUTER_API_KEY": "openrouter-secret",
             "ELEVENLABS_API_KEY": "eleven-secret",
             "HISTORY_SLEEP_VOICE_ID": "voice-secret",
         },
@@ -405,7 +424,7 @@ def test_invalid_or_extra_capability_plan_is_rejected_before_probes() -> None:
 def test_credential_probe_refuses_all_redirects() -> None:
     handler = _NoRedirect()
     request = urllib.request.Request(
-        "https://api.openai.com/v1/models",
+        "https://openrouter.ai/api/v1/models",
         headers={"Authorization": "Bearer must-not-forward"},
     )
 
@@ -428,7 +447,7 @@ def test_invalid_credit_quotes_fail_closed(quoted: object) -> None:
     report = run_live_provider_preflight(
         _plan(),
         environ={
-            "OPENAI_API_KEY": "openai-secret",
+            "OPENROUTER_API_KEY": "openrouter-secret",
             "ELEVENLABS_API_KEY": "eleven-secret",
             "HISTORY_SLEEP_VOICE_ID": "voice-secret",
         },
@@ -439,3 +458,93 @@ def test_invalid_credit_quotes_fail_closed(quoted: object) -> None:
 
     assert report["ready"] is False
     assert report["capabilities"][2]["reason_code"] == "credit_quote_invalid"
+
+
+@pytest.mark.parametrize(
+    ("key_data", "expected_code"),
+    [
+        ({"limit_remaining": 0.25}, "provider_key_limit_missing"),
+        ({"limit": 1.0, "limit_remaining": 1.0}, "provider_key_limit_exceeded"),
+        ({"limit": 0.25, "limit_remaining": 0.0}, "provider_key_budget_exhausted"),
+    ],
+)
+def test_openrouter_key_limit_must_enforce_the_smoke_cap(
+    key_data: dict, expected_code: str
+) -> None:
+    post_calls = 0
+
+    def request_json(url: str, headers: dict[str, str], timeout: int) -> object:
+        if url == "https://openrouter.ai/api/v1/key":
+            return {"data": key_data}
+        return _request_json(url, headers, timeout)
+
+    def post_json(*args, **kwargs):
+        nonlocal post_calls
+        post_calls += 1
+        raise AssertionError("unsafe key configuration reached a paid request")
+
+    report = run_live_provider_preflight(
+        _plan(),
+        environ={
+            "OPENROUTER_API_KEY": "openrouter-secret",
+            "ELEVENLABS_API_KEY": "eleven-secret",
+            "HISTORY_SLEEP_VOICE_ID": "voice-secret",
+        },
+        request_json=request_json,
+        post_json=post_json,
+        run_command=_run_command,
+        higgsfield_module=FakeHiggsfield(),
+    )
+
+    assert post_calls == 0
+    assert report["ready"] is False
+    assert report["capabilities"][0]["reason_code"] == expected_code
+
+
+@pytest.mark.parametrize("web_search_requests", [0, 2, True, None])
+def test_research_smoke_requires_usage_proof_of_exactly_one_web_search(
+    web_search_requests: object,
+) -> None:
+    plan = _plan()
+    request_sha = spend_request_hash(
+        tool=plan["research"]["tool"],
+        model=plan["research"]["model"],
+        params=plan["research"]["smoke"],
+    )
+
+    def post_json(*args, **kwargs) -> object:
+        return {
+            "id": "resp_research_smoke_001",
+            "status": "completed",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "total_tokens": 110,
+                "server_tool_use": {"web_search_requests": web_search_requests},
+            },
+        }
+
+    report = run_live_provider_preflight(
+        plan,
+        environ={
+            "OPENROUTER_API_KEY": "openrouter-secret",
+            "ELEVENLABS_API_KEY": "eleven-secret",
+            "HISTORY_SLEEP_VOICE_ID": "voice-secret",
+        },
+        request_json=_request_json,
+        post_json=post_json,
+        run_command=_run_command,
+        higgsfield_module=FakeHiggsfield(),
+        research_smoke_authorization={
+            "approval_id": "history-sleep--rehearsal-001--research-smoke",
+            "paid_actions_authorized": True,
+            "tool": plan["research"]["tool"],
+            "model": plan["research"]["model"],
+            "request_sha256": request_sha,
+            "max_usd": 0.25,
+        },
+    )
+
+    assert report["ready"] is False
+    assert report["paid_actions_executed"] is True
+    assert report["capabilities"][0]["reason_code"] == "paid_web_search_execution_unverified"
