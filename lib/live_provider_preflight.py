@@ -120,6 +120,7 @@ def _research_smoke_request(choice: Mapping[str, Any]) -> dict[str, Any]:
             }
         ],
         "tool_choice": "required",
+        "max_tool_calls": smoke["max_tool_calls"],
         "max_output_tokens": smoke["max_output_tokens"],
         "reasoning": {"effort": smoke["reasoning_effort"]},
         "store": False,
@@ -174,6 +175,8 @@ def _valid_research_smoke_evidence(evidence: Any, choice: Mapping[str, Any]) -> 
         "actual_cost_usd",
         "max_usd",
         "provider_key_limit_usd",
+        "provider_key_remaining_before_usd",
+        "provider_key_remaining_after_usd",
     )
     if any(
         isinstance(evidence.get(key), bool)
@@ -193,13 +196,52 @@ def _valid_research_smoke_evidence(evidence: Any, choice: Mapping[str, Any]) -> 
         <= float(choice["smoke"]["key_limit_usd"])
         and float(evidence["estimated_cost_usd"]) <= float(evidence["max_usd"])
         and float(evidence["actual_cost_usd"]) <= float(evidence["max_usd"])
+        and float(evidence["provider_key_remaining_before_usd"])
+        <= float(evidence["provider_key_limit_usd"])
+        and 0
+        <= float(evidence["provider_key_remaining_after_usd"])
+        < float(evidence["provider_key_remaining_before_usd"])
+        and math.isclose(
+            float(evidence["actual_cost_usd"]),
+            float(evidence["provider_key_remaining_before_usd"])
+            - float(evidence["provider_key_remaining_after_usd"]),
+        )
     )
+
+
+def _has_url_citation(payload: Mapping[str, Any]) -> bool:
+    output = payload.get("output")
+    if not isinstance(output, list):
+        return False
+    for item in output:
+        if not isinstance(item, Mapping):
+            continue
+        content_items = item.get("content")
+        if not isinstance(content_items, list):
+            continue
+        for content in content_items:
+            if not isinstance(content, Mapping):
+                continue
+            annotations = content.get("annotations")
+            if not isinstance(annotations, list):
+                continue
+            if any(
+                isinstance(annotation, Mapping)
+                and annotation.get("type") == "url_citation"
+                and isinstance(annotation.get("url"), str)
+                and bool(annotation["url"])
+                for annotation in annotations
+            ):
+                return True
+    return False
 
 
 def _research_smoke_evidence(
     payload: object,
     choice: Mapping[str, Any],
     provider_key_limit_usd: float,
+    provider_key_remaining_before_usd: float,
+    provider_key_remaining_after_usd: float,
 ) -> dict[str, Any] | None:
     if not isinstance(payload, dict) or payload.get("status") != "completed":
         return None
@@ -217,12 +259,15 @@ def _research_smoke_evidence(
         if isinstance(server_tool_use, dict)
         else None
     )
-    if (
-        not isinstance(server_tool_use, dict)
-        or isinstance(web_search_requests, bool)
-        or not isinstance(web_search_requests, int)
-        or web_search_requests != 1
-    ):
+    if server_tool_use is not None:
+        if (
+            not isinstance(server_tool_use, dict)
+            or isinstance(web_search_requests, bool)
+            or not isinstance(web_search_requests, int)
+            or web_search_requests != 1
+        ):
+            return None
+    elif not _has_url_citation(payload):
         return None
     token_fields = ("input_tokens", "output_tokens", "total_tokens")
     if any(
@@ -234,12 +279,14 @@ def _research_smoke_evidence(
         return None
     if usage["total_tokens"] != usage["input_tokens"] + usage["output_tokens"]:
         return None
-    actual_cost = usage.get("cost")
+    actual_cost = (
+        provider_key_remaining_before_usd - provider_key_remaining_after_usd
+    )
     if (
         isinstance(actual_cost, bool)
         or not isinstance(actual_cost, (int, float))
         or not math.isfinite(actual_cost)
-        or actual_cost < 0
+        or actual_cost <= 0
     ):
         return None
     pricing = choice["smoke"]["pricing"]
@@ -259,6 +306,8 @@ def _research_smoke_evidence(
         "actual_cost_usd": float(actual_cost),
         "max_usd": float(choice["smoke"]["max_usd"]),
         "provider_key_limit_usd": provider_key_limit_usd,
+        "provider_key_remaining_before_usd": provider_key_remaining_before_usd,
+        "provider_key_remaining_after_usd": provider_key_remaining_after_usd,
     }
     return evidence if _valid_research_smoke_evidence(evidence, choice) else None
 
@@ -346,7 +395,34 @@ def _probe_openrouter(
             _research_smoke_request(choice),
             30,
         )
-        evidence = _research_smoke_evidence(payload, choice, float(provider_limit))
+        after_payload = request_json(
+            "https://openrouter.ai/api/v1/key",
+            {"Authorization": f"Bearer {key}"},
+            30,
+        )
+        after_data = (
+            after_payload.get("data") if isinstance(after_payload, dict) else None
+        )
+        after_remaining = (
+            after_data.get("limit_remaining")
+            if isinstance(after_data, Mapping)
+            else None
+        )
+        if (
+            isinstance(after_remaining, bool)
+            or not isinstance(after_remaining, (int, float))
+            or not math.isfinite(after_remaining)
+            or after_remaining < 0
+        ):
+            evidence = None
+        else:
+            evidence = _research_smoke_evidence(
+                payload,
+                choice,
+                float(provider_limit),
+                float(remaining),
+                float(after_remaining),
+            )
     except Exception:
         evidence = None
     if evidence is None:
@@ -496,6 +572,7 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
     smoke = plan["research"].get("smoke")
     if not isinstance(smoke, Mapping) or set(smoke) != {
         "input",
+        "max_tool_calls",
         "max_output_tokens",
         "reasoning_effort",
         "search_engine",
@@ -509,6 +586,8 @@ def _validate_plan(plan: Mapping[str, Any]) -> None:
         raise ValueError("research.smoke must define the bounded capability request")
     if not isinstance(smoke["input"], str) or not smoke["input"].strip():
         raise ValueError("research.smoke.input must be a non-empty string")
+    if smoke["max_tool_calls"] != 1:
+        raise ValueError("research.smoke.max_tool_calls must be exactly one")
     if (
         isinstance(smoke["max_output_tokens"], bool)
         or not isinstance(smoke["max_output_tokens"], int)

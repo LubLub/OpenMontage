@@ -20,6 +20,7 @@ def _plan() -> dict:
             "credential_ref": "env:OPENROUTER_API_KEY",
             "smoke": {
                 "input": "Find the date the World Wide Web was invented and cite one source.",
+                "max_tool_calls": 1,
                 "max_output_tokens": 256,
                 "reasoning_effort": "low",
                 "search_engine": "exa",
@@ -170,6 +171,15 @@ def test_preflight_probes_all_six_capabilities_and_defers_paid_research_smoke() 
 
 def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> None:
     requests: list[tuple[str, dict, dict, int]] = []
+    key_status_calls = 0
+
+    def request_json(url: str, headers: dict[str, str], timeout: int) -> object:
+        nonlocal key_status_calls
+        if url == "https://openrouter.ai/api/v1/key":
+            key_status_calls += 1
+            remaining = 0.25 if key_status_calls == 1 else 0.2325
+            return {"data": {"limit": 0.25, "limit_remaining": remaining}}
+        return _request_json(url, headers, timeout)
 
     def post_json(url: str, headers: dict, body: dict, timeout: int) -> object:
         requests.append((url, headers, body, timeout))
@@ -178,24 +188,25 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
             "status": "completed",
             "output": [
                 {
-                    "type": "web_search_call",
-                    "status": "completed",
-                    "action": {
-                        "type": "search",
-                        "query": "must-not-be-persisted",
-                        "sources": [{"url": "https://must-not-be-persisted.invalid"}],
-                    },
-                },
-                {
                     "type": "message",
-                    "content": [{"type": "output_text", "text": "must-not-leak"}],
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "must-not-leak",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://must-not-be-persisted.invalid",
+                                }
+                            ],
+                        }
+                    ],
                 },
             ],
             "usage": {
                 "input_tokens": 8000,
                 "output_tokens": 32,
                 "total_tokens": 8032,
-                "cost": 0.0175,
                 "server_tool_use": {"web_search_requests": 1},
             },
         }
@@ -213,7 +224,7 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
             "ELEVENLABS_API_KEY": "eleven-secret",
             "HISTORY_SLEEP_VOICE_ID": "voice-secret",
         },
-        request_json=_request_json,
+        request_json=request_json,
         post_json=post_json,
         run_command=_run_command,
         higgsfield_module=FakeHiggsfield(),
@@ -242,9 +253,11 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
         "output_tokens": 32,
         "total_tokens": 8032,
         "estimated_cost_usd": pytest.approx(0.017288),
-        "actual_cost_usd": 0.0175,
+        "actual_cost_usd": pytest.approx(0.0175),
         "max_usd": 0.25,
         "provider_key_limit_usd": 0.25,
+        "provider_key_remaining_before_usd": 0.25,
+        "provider_key_remaining_after_usd": 0.2325,
     }
     assert requests == [
         (
@@ -268,6 +281,7 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
                     }
                 ],
                 "tool_choice": "required",
+                "max_tool_calls": 1,
                 "max_output_tokens": 256,
                 "reasoning": {"effort": "low"},
                 "store": False,
@@ -341,6 +355,8 @@ def test_verified_research_smoke_evidence_is_reused_without_another_paid_call() 
         "actual_cost_usd": 0.0175,
         "max_usd": 0.25,
         "provider_key_limit_usd": 0.25,
+        "provider_key_remaining_before_usd": 0.25,
+        "provider_key_remaining_after_usd": 0.2325,
     }
     report = run_live_provider_preflight(
         plan,
@@ -553,8 +569,9 @@ def test_research_smoke_requires_usage_proof_of_exactly_one_web_search(
     assert report["capabilities"][0]["reason_code"] == "paid_web_search_execution_unverified"
 
 
-def test_research_smoke_requires_provider_reported_actual_cost() -> None:
+def test_research_smoke_derives_actual_cost_from_provider_key_balance() -> None:
     plan = _plan()
+    key_status_calls = 0
     request_sha = spend_request_hash(
         tool=plan["research"]["tool"],
         model=plan["research"]["model"],
@@ -565,13 +582,37 @@ def test_research_smoke_requires_provider_reported_actual_cost() -> None:
         return {
             "id": "resp_research_smoke_001",
             "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {
+                            "type": "output_text",
+                            "text": "must-not-persist",
+                            "annotations": [
+                                {
+                                    "type": "url_citation",
+                                    "url": "https://must-not-persist.invalid",
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
             "usage": {
                 "input_tokens": 100,
                 "output_tokens": 10,
                 "total_tokens": 110,
-                "server_tool_use": {"web_search_requests": 1},
             },
         }
+
+    def request_json(url: str, headers: dict[str, str], timeout: int) -> object:
+        nonlocal key_status_calls
+        if url == "https://openrouter.ai/api/v1/key":
+            key_status_calls += 1
+            remaining = 0.25 if key_status_calls == 1 else 0.23976
+            return {"data": {"limit": 0.25, "limit_remaining": remaining}}
+        return _request_json(url, headers, timeout)
 
     report = run_live_provider_preflight(
         plan,
@@ -580,7 +621,7 @@ def test_research_smoke_requires_provider_reported_actual_cost() -> None:
             "ELEVENLABS_API_KEY": "eleven-secret",
             "HISTORY_SLEEP_VOICE_ID": "voice-secret",
         },
-        request_json=_request_json,
+        request_json=request_json,
         post_json=post_json,
         run_command=_run_command,
         higgsfield_module=FakeHiggsfield(),
@@ -594,6 +635,9 @@ def test_research_smoke_requires_provider_reported_actual_cost() -> None:
         },
     )
 
-    assert report["ready"] is False
+    assert report["ready"] is True
     assert report["paid_actions_executed"] is True
-    assert report["capabilities"][0]["reason_code"] == "paid_web_search_execution_unverified"
+    evidence = report["capabilities"][0]["research_smoke"]
+    assert evidence["actual_cost_usd"] == pytest.approx(0.01024)
+    assert evidence["provider_key_remaining_before_usd"] == 0.25
+    assert evidence["provider_key_remaining_after_usd"] == 0.23976
