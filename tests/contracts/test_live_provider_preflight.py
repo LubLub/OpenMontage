@@ -195,6 +195,7 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
                 "input_tokens": 8000,
                 "output_tokens": 32,
                 "total_tokens": 8032,
+                "cost": 0.0175,
                 "server_tool_use": {"web_search_requests": 1},
             },
         }
@@ -241,6 +242,7 @@ def test_explicit_bound_authorization_executes_one_capped_research_smoke() -> No
         "output_tokens": 32,
         "total_tokens": 8032,
         "estimated_cost_usd": pytest.approx(0.017288),
+        "actual_cost_usd": 0.0175,
         "max_usd": 0.25,
         "provider_key_limit_usd": 0.25,
     }
@@ -336,6 +338,7 @@ def test_verified_research_smoke_evidence_is_reused_without_another_paid_call() 
         "output_tokens": 32,
         "total_tokens": 8032,
         "estimated_cost_usd": 0.017288,
+        "actual_cost_usd": 0.0175,
         "max_usd": 0.25,
         "provider_key_limit_usd": 0.25,
     }
@@ -521,6 +524,52 @@ def test_research_smoke_requires_usage_proof_of_exactly_one_web_search(
                 "output_tokens": 10,
                 "total_tokens": 110,
                 "server_tool_use": {"web_search_requests": web_search_requests},
+            },
+        }
+
+    report = run_live_provider_preflight(
+        plan,
+        environ={
+            "OPENROUTER_API_KEY": "openrouter-secret",
+            "ELEVENLABS_API_KEY": "eleven-secret",
+            "HISTORY_SLEEP_VOICE_ID": "voice-secret",
+        },
+        request_json=_request_json,
+        post_json=post_json,
+        run_command=_run_command,
+        higgsfield_module=FakeHiggsfield(),
+        research_smoke_authorization={
+            "approval_id": "history-sleep--rehearsal-001--research-smoke",
+            "paid_actions_authorized": True,
+            "tool": plan["research"]["tool"],
+            "model": plan["research"]["model"],
+            "request_sha256": request_sha,
+            "max_usd": 0.25,
+        },
+    )
+
+    assert report["ready"] is False
+    assert report["paid_actions_executed"] is True
+    assert report["capabilities"][0]["reason_code"] == "paid_web_search_execution_unverified"
+
+
+def test_research_smoke_requires_provider_reported_actual_cost() -> None:
+    plan = _plan()
+    request_sha = spend_request_hash(
+        tool=plan["research"]["tool"],
+        model=plan["research"]["model"],
+        params=plan["research"]["smoke"],
+    )
+
+    def post_json(*args, **kwargs) -> object:
+        return {
+            "id": "resp_research_smoke_001",
+            "status": "completed",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 10,
+                "total_tokens": 110,
+                "server_tool_use": {"web_search_requests": 1},
             },
         }
 

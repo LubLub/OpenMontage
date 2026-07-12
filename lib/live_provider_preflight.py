@@ -171,6 +171,7 @@ def _valid_research_smoke_evidence(evidence: Any, choice: Mapping[str, Any]) -> 
         "output_tokens",
         "total_tokens",
         "estimated_cost_usd",
+        "actual_cost_usd",
         "max_usd",
         "provider_key_limit_usd",
     )
@@ -191,6 +192,7 @@ def _valid_research_smoke_evidence(evidence: Any, choice: Mapping[str, Any]) -> 
         < float(evidence["provider_key_limit_usd"])
         <= float(choice["smoke"]["key_limit_usd"])
         and float(evidence["estimated_cost_usd"]) <= float(evidence["max_usd"])
+        and float(evidence["actual_cost_usd"]) <= float(evidence["max_usd"])
     )
 
 
@@ -232,6 +234,14 @@ def _research_smoke_evidence(
         return None
     if usage["total_tokens"] != usage["input_tokens"] + usage["output_tokens"]:
         return None
+    actual_cost = usage.get("cost")
+    if (
+        isinstance(actual_cost, bool)
+        or not isinstance(actual_cost, (int, float))
+        or not math.isfinite(actual_cost)
+        or actual_cost < 0
+    ):
+        return None
     pricing = choice["smoke"]["pricing"]
     estimated_cost = (
         usage["input_tokens"] * pricing["input_usd_per_million_tokens"] / 1_000_000
@@ -246,6 +256,7 @@ def _research_smoke_evidence(
         "output_tokens": usage["output_tokens"],
         "total_tokens": usage["total_tokens"],
         "estimated_cost_usd": estimated_cost,
+        "actual_cost_usd": float(actual_cost),
         "max_usd": float(choice["smoke"]["max_usd"]),
         "provider_key_limit_usd": provider_key_limit_usd,
     }
