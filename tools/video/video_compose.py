@@ -30,12 +30,16 @@ the agent to re-ask the user rather than substituting a different engine.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import re
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
+
+import jsonschema
 
 from tools.base_tool import (
     BaseTool,
@@ -118,6 +122,24 @@ class VideoCompose(BaseTool):
                     "into remotion_bundle."
                 ),
             },
+            "editorial_package": {
+                "type": "object",
+                "description": (
+                    "Exact Editorial Package bound by the Asset Manifest. "
+                    "Required for a generative-documentary Remotion atelier "
+                    "render and verified before compose."
+                ),
+            },
+            "remotion_bundle": {
+                "type": "object",
+                "description": (
+                    "Validated output from remotion_bundle. Required for a "
+                    "generative-documentary Remotion atelier render."
+                ),
+            },
+            "remotion_bundle_path": {"type": "string"},
+            "remotion_bundle_versioned_path": {"type": "string"},
+            "remotion_bundle_snapshot_dir": {"type": "string"},
             "proposal_packet": {
                 "type": "object",
                 "description": (
@@ -759,6 +781,17 @@ class VideoCompose(BaseTool):
             "concurrency":    <optional int>,
         }
         """
+        try:
+            inputs, edit_decisions = self._lock_atelier_render_inputs(
+                inputs,
+                edit_decisions,
+            )
+        except (jsonschema.ValidationError, KeyError, OSError, TypeError, ValueError) as exc:
+            return ToolResult(
+                success=False,
+                error=f"Remotion bundle drifted before render: {exc}",
+            )
+
         bespoke = edit_decisions.get("bespoke") or {}
         entry = bespoke.get("entry")
         comp_id = bespoke.get("composition_id")
@@ -781,6 +814,28 @@ class VideoCompose(BaseTool):
                     f"Run `cd remotion-composer && npm install` first."
                 ),
             )
+        if inputs.get("remotion_bundle"):
+            installed_package = composer_dir / "node_modules" / "remotion" / "package.json"
+            try:
+                installed_version = json.loads(
+                    installed_package.read_text(encoding="utf-8")
+                )["version"]
+            except (KeyError, OSError, json.JSONDecodeError) as exc:
+                return ToolResult(
+                    success=False,
+                    error=f"Installed Remotion package cannot be verified: {exc}",
+                )
+            locked_version = inputs["remotion_bundle"]["runtime_lock"][
+                "remotion_version"
+            ]
+            if installed_version != locked_version:
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "Installed Remotion version does not match remotion_bundle: "
+                        f"installed {installed_version}, locked {locked_version}"
+                    ),
+                )
 
         entry_path = Path(entry)
         if not entry_path.is_absolute():
@@ -806,7 +861,17 @@ class VideoCompose(BaseTool):
             effective_entry = entry_path
         except ValueError:
             try:
-                effective_entry = self._stage_atelier_project(entry_path, composer_dir)
+                bundle = inputs.get("remotion_bundle") or {}
+                effective_entry = self._stage_atelier_project(
+                    entry_path,
+                    composer_dir,
+                    project_dir=(
+                        Path(inputs["project_dir"]).resolve()
+                        if bundle
+                        else None
+                    ),
+                    source_receipts=bundle.get("source_files"),
+                )
             except Exception as e:
                 return ToolResult(
                     success=False,
@@ -842,6 +907,29 @@ class VideoCompose(BaseTool):
             cmd.append(f"--crf={bespoke['crf']}")
         if bespoke.get("concurrency"):
             cmd.append(f"--concurrency={bespoke['concurrency']}")
+
+        qa_ladder: dict[str, Any] | None = None
+        if inputs.get("remotion_bundle"):
+            try:
+                qa_ladder = self._run_atelier_qa_ladder(
+                    inputs=inputs,
+                    edit_decisions=edit_decisions,
+                    effective_entry=effective_entry,
+                    composer_dir=composer_dir,
+                )
+                from tools.video.remotion_bundle import verify_remotion_bundle
+
+                verify_remotion_bundle(
+                    inputs["remotion_bundle"],
+                    Path(inputs["project_dir"]).resolve(),
+                    inputs,
+                )
+            except Exception as exc:
+                return ToolResult(
+                    success=False,
+                    error=f"Atelier Remotion QA ladder failed before full render: {exc}",
+                    data={"qa_ladder": qa_ladder or {}},
+                )
 
         try:
             # Run from inside the composer dir so npx resolves the local
@@ -889,6 +977,7 @@ class VideoCompose(BaseTool):
             "effective_entry": str(effective_entry) if effective_entry != entry_path else None,
             "composition_id": comp_id,
             "output": str(output_path),
+            "qa_ladder": qa_ladder,
             "final_review": final_review,
             "final_review_status": final_review.get("status"),
         }
@@ -906,12 +995,189 @@ class VideoCompose(BaseTool):
 
         return ToolResult(success=True, data=data, artifacts=[str(output_path)])
 
+    def _run_atelier_qa_ladder(
+        self,
+        *,
+        inputs: dict[str, Any],
+        edit_decisions: dict[str, Any],
+        effective_entry: Path,
+        composer_dir: Path,
+    ) -> dict[str, Any]:
+        """Run deterministic local checks before an approval-bound full render."""
+        project_dir = Path(inputs["project_dir"]).resolve()
+        bundle = inputs["remotion_bundle"]
+        bespoke = edit_decisions["bespoke"]
+        comp_id = bespoke["composition_id"]
+        props_path = Path(bespoke["props_path"]).resolve()
+        public_dir = Path(bespoke["public_dir"]).resolve()
+        bundle_id = bundle["content_hash"].removeprefix("sha256:")
+        qa_dir = project_dir / "artifacts" / "remotion-qa" / bundle_id
+        still_dir = qa_dir / "stills"
+        still_dir.mkdir(parents=True, exist_ok=True)
+
+        typecheck_cmd = [
+            "npx",
+            "tsc",
+            "--noEmit",
+            "--jsx",
+            "react-jsx",
+            "--target",
+            "ES2020",
+            "--module",
+            "ESNext",
+            "--moduleResolution",
+            "bundler",
+            "--esModuleInterop",
+            "--skipLibCheck",
+            str(effective_entry),
+        ]
+        self.run_command(typecheck_cmd, timeout=600, cwd=composer_dir)
+
+        common_args = [
+            f"--props={props_path}",
+            f"--public-dir={public_dir}",
+        ]
+        self.run_command(
+            [
+                "npx",
+                "remotion",
+                "compositions",
+                str(effective_entry),
+                *common_args,
+            ],
+            timeout=600,
+            cwd=composer_dir,
+        )
+
+        try:
+            props = json.loads(props_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"cannot read locked Remotion props: {exc}") from exc
+        fps = int(props.get("fps") or 30)
+        scenes = (inputs.get("scene_plan") or {}).get("scenes") or []
+        if not scenes:
+            raise ValueError("scene_plan must contain scenes for representative still QA")
+
+        stills: list[str] = []
+        max_end_seconds = 0.0
+        for scene in scenes:
+            scene_id = str(scene.get("id") or "").strip()
+            if not scene_id:
+                raise ValueError("scene_plan scene is missing id")
+            safe_id = re.sub(r"[^A-Za-z0-9._-]+", "-", scene_id).strip(".-")
+            if not safe_id:
+                raise ValueError(f"scene id cannot form a safe still filename: {scene_id!r}")
+            start = float(scene.get("start_seconds") or 0)
+            end = float(scene.get("end_seconds") or start)
+            max_end_seconds = max(max_end_seconds, end)
+            frame = max(0, round(((start + end) / 2) * fps))
+            still_path = still_dir / f"{safe_id}.png"
+            self.run_command(
+                [
+                    "npx",
+                    "remotion",
+                    "still",
+                    str(effective_entry),
+                    str(comp_id),
+                    str(still_path),
+                    f"--frame={frame}",
+                    *common_args,
+                ],
+                timeout=600,
+                cwd=composer_dir,
+            )
+            if not still_path.is_file():
+                raise ValueError(f"representative still was not created: {still_path}")
+            stills.append(str(still_path))
+
+        proxy_path = qa_dir / "proxy.mp4"
+        proxy_last_frame = max(0, min(round(max_end_seconds * fps) - 1, fps * 5 - 1))
+        proxy_cmd = [
+            "npx",
+            "remotion",
+            "render",
+            str(effective_entry),
+            str(comp_id),
+            str(proxy_path),
+            f"--frames=0-{proxy_last_frame}",
+            "--scale=0.5",
+            *common_args,
+        ]
+        if bespoke.get("concurrency"):
+            proxy_cmd.append(f"--concurrency={bespoke['concurrency']}")
+        self.run_command(proxy_cmd, timeout=900, cwd=composer_dir)
+        if not proxy_path.is_file():
+            raise ValueError(f"short proxy was not created: {proxy_path}")
+
+        return {
+            "bundle_content_hash": bundle["content_hash"],
+            "typecheck": "pass",
+            "composition_validation": "pass",
+            "representative_stills": stills,
+            "proxy": str(proxy_path),
+            "status": "pass",
+        }
+
+    @staticmethod
+    def _lock_atelier_render_inputs(
+        inputs: dict[str, Any],
+        edit_decisions: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Resolve render settings from the bundle and reject mutable-input drift."""
+        bundle = inputs.get("remotion_bundle")
+        if not bundle:
+            return inputs, edit_decisions
+
+        from tools.video.remotion_bundle import verify_remotion_bundle
+
+        project_dir = Path(inputs["project_dir"]).resolve()
+        verify_remotion_bundle(bundle, project_dir, inputs)
+        spec = bundle["render_spec"]
+
+        locked_output = (project_dir / spec["output_path"]).resolve()
+        caller_output = inputs.get("output_path")
+        if caller_output:
+            candidate = Path(caller_output)
+            candidate = (
+                candidate.resolve()
+                if candidate.is_absolute()
+                else (project_dir / candidate).resolve()
+            )
+            if candidate != locked_output:
+                raise ValueError(
+                    "output_path does not match remotion_bundle render_spec.output_path"
+                )
+
+        locked_bespoke: dict[str, Any] = {
+            "entry": str((project_dir / spec["entry"]).resolve()),
+            "composition_id": spec["composition_id"],
+            "art_direction": bundle["art_direction"],
+            "props_path": str((project_dir / spec["props_path"]).resolve()),
+            "public_dir": str((project_dir / spec["public_dir"]).resolve()),
+        }
+        for option in ("scale", "crf", "concurrency"):
+            if option in spec:
+                locked_bespoke[option] = spec[option]
+
+        locked_inputs = dict(inputs)
+        locked_inputs["output_path"] = str(locked_output)
+        locked_edit_decisions = dict(edit_decisions)
+        locked_edit_decisions["bespoke"] = locked_bespoke
+        return locked_inputs, locked_edit_decisions
+
     # Source-file extensions that get staged into the composer tree at render time.
     # Anything not in this set lives only under the real project dir (assets, renders,
     # artifacts) and is referenced via --public-dir or absolute paths.
     _ATELIER_STAGE_EXTS = {".tsx", ".ts", ".jsx", ".js", ".css"}
 
-    def _stage_atelier_project(self, entry_path: Path, composer_dir: Path) -> Path:
+    def _stage_atelier_project(
+        self,
+        entry_path: Path,
+        composer_dir: Path,
+        *,
+        project_dir: Path | None = None,
+        source_receipts: list[dict[str, str]] | None = None,
+    ) -> Path:
         """Auto-stage a bespoke project under remotion-composer/projects/<slug>/.
 
         The source of truth lives under the repo-root `projects/<slug>/` (where
@@ -921,10 +1187,10 @@ class VideoCompose(BaseTool):
         dereference and webpack would fail to find node_modules. We copy the
         source files into a sibling dir inside the composer tree instead.
 
-        mtime-skip semantics make repeat renders cheap (typical project is a
-        handful of small .tsx files). Non-source files (assets, renders, props
-        JSON) stay only in the real project dir and are referenced via
-        --public-dir or absolute paths in props.
+        mtime-skip semantics make repeat renders cheap. Approval-bound renders
+        stage every file named by the bundle's source receipts so imported JSON,
+        SVG, fonts, and media are covered as well as TypeScript. Legacy callers
+        retain the source-extension filter.
 
         Resolves the slug as the first path segment under a `projects/` ancestor;
         falls back to the entry's parent directory name. Returns the staged entry
@@ -932,7 +1198,7 @@ class VideoCompose(BaseTool):
         """
         import shutil
 
-        real_project_dir = entry_path.parent.resolve()
+        real_project_dir = (project_dir or entry_path.parent).resolve()
 
         # Derive a stable slug. Prefer the first segment under a `projects/` ancestor.
         slug = real_project_dir.name
@@ -962,15 +1228,41 @@ class VideoCompose(BaseTool):
 
         staging_dir.mkdir(parents=True, exist_ok=True)
 
-        # mtime-skip copy of source files only. Mirrors directory structure so
-        # relative imports work identically.
-        for src in real_project_dir.rglob("*"):
-            if not src.is_file():
-                continue
-            if src.suffix.lower() not in self._ATELIER_STAGE_EXTS:
-                continue
+        if source_receipts is not None:
+            receipts_by_path = {
+                Path(receipt["path"]): receipt["sha256"]
+                for receipt in source_receipts
+            }
+            sources = [
+                (real_project_dir / relative).resolve()
+                for relative in receipts_by_path
+            ]
+            for staged in sorted(staging_dir.rglob("*"), reverse=True):
+                if staged.is_file() and staged.relative_to(staging_dir) not in receipts_by_path:
+                    staged.unlink()
+                elif staged.is_dir():
+                    try:
+                        staged.rmdir()
+                    except OSError:
+                        pass
+        else:
+            receipts_by_path = None
+            sources = [
+                src
+                for src in real_project_dir.rglob("*")
+                if src.is_file() and src.suffix.lower() in self._ATELIER_STAGE_EXTS
+            ]
+
+        for src in sources:
             rel = src.relative_to(real_project_dir)
             dst = staging_dir / rel
+            if receipts_by_path is not None:
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+                digest = hashlib.sha256(dst.read_bytes()).hexdigest()
+                if digest != receipts_by_path[rel]:
+                    raise ValueError(f"staged source hash mismatch: {rel.as_posix()}")
+                continue
             try:
                 if dst.exists() and dst.stat().st_mtime >= src.stat().st_mtime:
                     continue
@@ -979,7 +1271,7 @@ class VideoCompose(BaseTool):
             dst.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(src, dst)
 
-        return staging_dir / entry_path.name
+        return staging_dir / entry_path.relative_to(real_project_dir)
 
     # Stock-registry import patterns that violate the atelier doctrine.
     # Any of these inside a bespoke project tree means a creative component
@@ -1371,35 +1663,26 @@ class VideoCompose(BaseTool):
         )
         if render_runtime == "remotion" and remotion_atelier_requested:
             proposal_plan = ((inputs.get("proposal_packet") or {}).get("production_plan") or {})
-            if proposal_plan.get("pipeline") == "generative-documentary":
-                from tools.video.remotion_bundle import RemotionBundle
-
-                bundle_result = RemotionBundle().execute(
-                    {
-                        "project_dir": inputs.get("project_dir"),
-                        "proposal_packet": inputs.get("proposal_packet"),
-                        "scene_plan": inputs.get("scene_plan"),
-                        "asset_manifest": asset_manifest,
-                        "edit_decisions": edit_decisions,
-                    }
+            if (
+                proposal_plan.get("pipeline") == "generative-documentary"
+                and not inputs.get("remotion_bundle")
+            ):
+                return ToolResult(
+                    success=False,
+                    error=(
+                        "A prebuilt remotion_bundle is required before a "
+                        "generative-documentary Remotion atelier render. Run the "
+                        "registered remotion_bundle tool first; render will not "
+                        "build or substitute it implicitly."
+                    ),
                 )
-                if not bundle_result.success:
-                    return ToolResult(
-                        success=False,
-                        error=(
-                            "Remotion bundle validation failed before render: "
-                            f"{bundle_result.error}"
-                        ),
-                        data={"remotion_bundle": bundle_result.data},
-                    )
-                inputs = dict(inputs)
-                inputs["remotion_bundle"] = bundle_result.data["bundle"]
-                inputs["remotion_bundle_path"] = bundle_result.data["path"]
             render_result = self._render_via_atelier(inputs, edit_decisions)
             if inputs.get("remotion_bundle"):
                 data = dict(render_result.data or {})
                 data["remotion_bundle"] = {
                     "path": inputs["remotion_bundle_path"],
+                    "versioned_path": inputs["remotion_bundle_versioned_path"],
+                    "snapshot_dir": inputs.get("remotion_bundle_snapshot_dir"),
                     "content_hash": inputs["remotion_bundle"]["content_hash"],
                 }
                 render_result.data = data

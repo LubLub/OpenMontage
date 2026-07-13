@@ -5,11 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
+import jsonschema
+
+from schemas.artifacts import canonical_hash, validate_artifact
 from tools.base_tool import (
     BaseTool,
+    DependencyError,
     Determinism,
     ExecutionMode,
     ResourceProfile,
@@ -25,16 +30,6 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
-
-
-def _canonical_hash(value: Any) -> str:
-    payload = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    ).encode("utf-8")
-    return f"sha256:{hashlib.sha256(payload).hexdigest()}"
 
 
 def _inside(project_dir: Path, raw_path: str, field: str) -> tuple[Path, str]:
@@ -60,6 +55,110 @@ def _write_json(path: Path, document: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def _snapshot_bundle_files(
+    *,
+    project_dir: Path,
+    bundle: dict[str, Any],
+    versioned_path: Path,
+) -> Path:
+    """Archive exact project and runtime bytes under the bundle content hash."""
+    snapshot_dir = versioned_path.with_suffix("")
+    receipts = [*bundle["source_files"], *bundle["public_assets"]]
+    props_receipt = {
+        "path": bundle["render_spec"]["props_path"],
+        "sha256": bundle["input_hashes"]["props"].removeprefix("sha256:"),
+    }
+    receipts.append(props_receipt)
+    composer_dir = Path(__file__).resolve().parents[2] / "remotion-composer"
+    runtime_receipts = {
+        "package.json": bundle["runtime_lock"]["package_json_sha256"],
+        "package-lock.json": bundle["runtime_lock"]["package_lock_sha256"],
+    }
+
+    if snapshot_dir.exists():
+        for receipt in receipts:
+            archived = snapshot_dir / "project" / receipt["path"]
+            if not archived.is_file() or _sha256(archived) != receipt["sha256"]:
+                raise ValueError(f"immutable bundle snapshot is corrupt: {archived}")
+        for name, digest in runtime_receipts.items():
+            archived = snapshot_dir / "runtime" / name
+            if not archived.is_file() or _sha256(archived) != digest:
+                raise ValueError(f"immutable runtime snapshot is corrupt: {archived}")
+        return snapshot_dir
+
+    temporary = snapshot_dir.with_name(snapshot_dir.name + ".tmp")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    try:
+        for receipt in receipts:
+            source, relative = _inside(
+                project_dir,
+                receipt["path"],
+                "bundle snapshot source",
+            )
+            destination = temporary / "project" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+        for name in runtime_receipts:
+            destination = temporary / "runtime" / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(composer_dir / name, destination)
+        temporary.replace(snapshot_dir)
+    except Exception:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise
+    return snapshot_dir
+
+
+def verify_remotion_bundle(
+    bundle: dict[str, Any],
+    project_dir: Path,
+    inputs: dict[str, Any],
+) -> None:
+    """Fail if a validated bundle no longer describes the live render inputs."""
+    validate_artifact("remotion_bundle", bundle)
+
+    for name in (
+        "proposal_packet",
+        "scene_plan",
+        "editorial_package",
+        "asset_manifest",
+        "edit_decisions",
+    ):
+        if canonical_hash(inputs.get(name)) != bundle["input_hashes"][name]:
+            raise ValueError(f"{name} no longer matches remotion_bundle")
+
+    props, _ = _inside(
+        project_dir,
+        bundle["render_spec"]["props_path"],
+        "render_spec.props_path",
+    )
+    if f"sha256:{_sha256(props)}" != bundle["input_hashes"]["props"]:
+        raise ValueError("props no longer match remotion_bundle")
+
+    for receipt in (*bundle["source_files"], *bundle["public_assets"]):
+        path, _ = _inside(project_dir, receipt["path"], "bundle file receipt")
+        if not path.is_file() or _sha256(path) != receipt["sha256"]:
+            raise ValueError(
+                f"bundle file no longer matches remotion_bundle: {receipt['path']}"
+            )
+
+    composer_dir = Path(__file__).resolve().parents[2] / "remotion-composer"
+    runtime_files = {
+        "package_json_sha256": composer_dir / "package.json",
+        "package_lock_sha256": composer_dir / "package-lock.json",
+    }
+    for field, path in runtime_files.items():
+        if _sha256(path) != bundle["runtime_lock"][field]:
+            raise ValueError(f"Remotion runtime lock drifted: {path.name}")
+
+    rebuilt, _ = RemotionBundle()._build(inputs)
+    validate_artifact("remotion_bundle", rebuilt)
+    if rebuilt["content_hash"] != bundle["content_hash"]:
+        raise ValueError("live project inventory no longer matches remotion_bundle")
+
+
 class RemotionBundle(BaseTool):
     """Freeze the exact inputs to a generative-documentary Remotion render."""
 
@@ -72,7 +171,7 @@ class RemotionBundle(BaseTool):
     execution_mode = ExecutionMode.SYNC
     determinism = Determinism.DETERMINISTIC
 
-    dependencies: list[str] = []
+    dependencies = ["cmd:npx"]
     agent_skills = ["remotion-best-practices"]
     capabilities = ["build_versioned_remotion_bundle"]
     best_for = [
@@ -86,6 +185,7 @@ class RemotionBundle(BaseTool):
         "project_dir",
         "proposal_packet",
         "scene_plan",
+        "editorial_package",
         "asset_manifest",
         "edit_decisions",
     ]
@@ -96,6 +196,7 @@ class RemotionBundle(BaseTool):
             "project_dir",
             "proposal_packet",
             "scene_plan",
+            "editorial_package",
             "asset_manifest",
             "edit_decisions",
         ],
@@ -103,22 +204,53 @@ class RemotionBundle(BaseTool):
             "project_dir": {"type": "string"},
             "proposal_packet": {"type": "object"},
             "scene_plan": {"type": "object"},
+            "editorial_package": {"type": "object"},
             "asset_manifest": {"type": "object"},
             "edit_decisions": {"type": "object"},
-            "output_path": {"type": "string"},
+            "bundle_output_path": {"type": "string"},
         },
     }
+
+    def check_dependencies(self) -> None:
+        super().check_dependencies()
+        composer_dir = Path(__file__).resolve().parents[2] / "remotion-composer"
+        missing = [
+            path.name
+            for path in (composer_dir / "package.json", composer_dir / "package-lock.json")
+            if not path.is_file()
+        ]
+        if missing:
+            raise DependencyError(
+                "Remotion composer runtime lock is incomplete: " + ", ".join(missing)
+            )
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         try:
             bundle, output_path = self._build(inputs)
+            validate_artifact("remotion_bundle", bundle)
+            versioned_path = (
+                output_path.parent
+                / "remotion-bundles"
+                / f"{bundle['content_hash'].removeprefix('sha256:')}.json"
+            )
+            _write_json(versioned_path, bundle)
+            snapshot_dir = _snapshot_bundle_files(
+                project_dir=Path(inputs["project_dir"]).resolve(),
+                bundle=bundle,
+                versioned_path=versioned_path,
+            )
             _write_json(output_path, bundle)
-        except (KeyError, OSError, TypeError, ValueError) as exc:
+        except (jsonschema.ValidationError, KeyError, OSError, TypeError, ValueError) as exc:
             return ToolResult(success=False, error=str(exc))
         return ToolResult(
             success=True,
-            data={"bundle": bundle, "path": str(output_path)},
-            artifacts=[str(output_path)],
+            data={
+                "bundle": bundle,
+                "path": str(output_path),
+                "versioned_path": str(versioned_path),
+                "snapshot_dir": str(snapshot_dir),
+            },
+            artifacts=[str(output_path), str(versioned_path), str(snapshot_dir)],
         )
 
     def _build(self, inputs: dict[str, Any]) -> tuple[dict[str, Any], Path]:
@@ -128,6 +260,7 @@ class RemotionBundle(BaseTool):
 
         proposal = inputs["proposal_packet"]
         scene_plan = inputs["scene_plan"]
+        editorial_package = inputs["editorial_package"]
         asset_manifest = inputs["asset_manifest"]
         edit = inputs["edit_decisions"]
         plan = proposal.get("production_plan") or {}
@@ -136,7 +269,30 @@ class RemotionBundle(BaseTool):
         if plan.get("render_runtime") != "remotion" or edit.get("render_runtime") != "remotion":
             raise ValueError("proposal_packet and edit_decisions must lock render_runtime=remotion")
         if plan.get("composition_mode") != "atelier" or edit.get("composition_mode") != "atelier":
-            raise ValueError("proposal_packet and edit_decisions must lock composition_mode=atelier")
+            raise ValueError(
+                "proposal_packet and edit_decisions must lock composition_mode=atelier"
+            )
+
+        validate_artifact("editorial_package", editorial_package)
+        expected_component_hashes = {
+            "shotlist": canonical_hash(scene_plan),
+            "provider_plan": canonical_hash(proposal),
+        }
+        for component, expected_hash in expected_component_hashes.items():
+            if editorial_package[component]["content_hash"] != expected_hash:
+                raise ValueError(
+                    f"editorial_package {component} does not bind the supplied artifact"
+                )
+
+        expected_approval_scope = {
+            "package_id": editorial_package.get("package_id"),
+            "package_version": editorial_package.get("package_version"),
+            "content_hash": editorial_package.get("content_hash"),
+        }
+        if asset_manifest.get("approval_scope") != expected_approval_scope:
+            raise ValueError(
+                "asset_manifest approval_scope does not match editorial_package"
+            )
 
         bespoke = edit.get("bespoke") or {}
         entry, entry_relative = _inside(project_dir, bespoke["entry"], "bespoke.entry")
@@ -155,6 +311,18 @@ class RemotionBundle(BaseTool):
         if not project_id:
             raise ValueError("project.json must contain id or project_id")
 
+        output_raw = inputs.get(
+            "bundle_output_path",
+            "artifacts/remotion_bundle.json",
+        )
+        output_path, _ = _inside(project_dir, output_raw, "bundle_output_path")
+        versioned_dir = output_path.parent / "remotion-bundles"
+        render_output, render_output_relative = _inside(
+            project_dir,
+            plan["render_output_path"],
+            "render_spec.output_path",
+        )
+
         asset_ids_by_hash: dict[str, list[str]] = {}
         for asset in asset_manifest.get("assets", []):
             asset_path, _ = _inside(project_dir, asset["path"], f"asset {asset.get('id')} path")
@@ -163,39 +331,66 @@ class RemotionBundle(BaseTool):
             actual = _sha256(asset_path)
             expected = asset.get("sha256")
             if actual != expected:
-                raise ValueError(f"asset hash mismatch for {asset.get('id')}: expected {expected}, got {actual}")
+                raise ValueError(
+                    f"asset hash mismatch for {asset.get('id')}: "
+                    f"expected {expected}, got {actual}"
+                )
             asset_ids_by_hash.setdefault(actual, []).append(asset["id"])
 
         public_assets: list[dict[str, str]] = []
         for path in sorted(item for item in public_dir.rglob("*") if item.is_file()):
-            digest = _sha256(path)
+            public_path, asset_relative = _inside(
+                project_dir,
+                str(path),
+                "public asset",
+            )
+            digest = _sha256(public_path)
             asset_ids = sorted(asset_ids_by_hash.get(digest, []))
             if not asset_ids:
                 raise ValueError(
                     f"public asset is not provenance-bound in asset_manifest: "
-                    f"{path.relative_to(project_dir).as_posix()}"
+                    f"{asset_relative}"
+                )
+            if len(asset_ids) != 1:
+                raise ValueError(
+                    "public asset hash maps to multiple asset_manifest records; "
+                    f"use unique bytes or an explicit manifest identity: {asset_relative}"
                 )
             public_assets.append(
                 {
-                    "path": path.relative_to(project_dir).as_posix(),
+                    "path": asset_relative,
                     "sha256": digest,
                     "asset_id": asset_ids[0],
                 }
             )
 
-        source_extensions = {".tsx", ".ts", ".jsx", ".js", ".css"}
-        source_files = [
-            {
-                "path": path.relative_to(project_dir).as_posix(),
-                "sha256": _sha256(path),
-            }
-            for path in sorted(entry.parent.rglob("*"))
-            if path.is_file()
-            and path.suffix.lower() in source_extensions
-            and project_dir in path.parents
-        ]
+        source_files: list[dict[str, str]] = []
+        for path in sorted(entry.parent.rglob("*")):
+            if not path.is_file():
+                continue
+            source_path, source_relative = _inside(
+                project_dir,
+                str(path),
+                "atelier source",
+            )
+            if (
+                source_path in {props, output_path, render_output}
+                or public_dir == source_path
+                or public_dir in source_path.parents
+                or versioned_dir == source_path
+                or versioned_dir in source_path.parents
+                or "snapshots" in source_path.relative_to(project_dir).parts
+                or "remotion-qa" in source_path.relative_to(project_dir).parts
+            ):
+                continue
+            source_files.append(
+                {
+                    "path": source_relative,
+                    "sha256": _sha256(source_path),
+                }
+            )
         if not source_files:
-            raise ValueError("atelier source tree contains no TypeScript, JavaScript, or CSS files")
+            raise ValueError("atelier source tree contains no project-local files")
 
         composer_dir = Path(__file__).resolve().parents[2] / "remotion-composer"
         package_json = composer_dir / "package.json"
@@ -207,12 +402,6 @@ class RemotionBundle(BaseTool):
         )
         if not remotion_version:
             raise ValueError("Remotion version not found in remotion-composer/package-lock.json")
-
-        _, render_output_relative = _inside(
-            project_dir,
-            plan["render_output_path"],
-            "render_spec.output_path",
-        )
 
         render_spec: dict[str, Any] = {
             "render_runtime": "remotion",
@@ -232,10 +421,11 @@ class RemotionBundle(BaseTool):
             "project_id": project_id,
             "approval_scope": asset_manifest["approval_scope"],
             "input_hashes": {
-                "proposal_packet": _canonical_hash(proposal),
-                "scene_plan": _canonical_hash(scene_plan),
-                "asset_manifest": _canonical_hash(asset_manifest),
-                "edit_decisions": _canonical_hash(edit),
+                "proposal_packet": canonical_hash(proposal),
+                "scene_plan": canonical_hash(scene_plan),
+                "editorial_package": canonical_hash(editorial_package),
+                "asset_manifest": canonical_hash(asset_manifest),
+                "edit_decisions": canonical_hash(edit),
                 "props": f"sha256:{_sha256(props)}",
             },
             "runtime_lock": {
@@ -248,8 +438,6 @@ class RemotionBundle(BaseTool):
             "source_files": source_files,
             "public_assets": public_assets,
         }
-        bundle["content_hash"] = _canonical_hash(bundle)
+        bundle["content_hash"] = canonical_hash(bundle)
 
-        output_raw = inputs.get("output_path", "artifacts/remotion_bundle.json")
-        output_path, _ = _inside(project_dir, output_raw, "output_path")
         return bundle, output_path

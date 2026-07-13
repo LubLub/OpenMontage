@@ -31,10 +31,11 @@
     },
     "input_hashes": {
       "type": "object",
-      "required": ["proposal_packet", "scene_plan", "asset_manifest", "edit_decisions", "props"],
+      "required": ["proposal_packet", "scene_plan", "editorial_package", "asset_manifest", "edit_decisions", "props"],
       "properties": {
         "proposal_packet": { "$ref": "#/$defs/content_hash" },
         "scene_plan": { "$ref": "#/$defs/content_hash" },
+        "editorial_package": { "$ref": "#/$defs/content_hash" },
         "asset_manifest": { "$ref": "#/$defs/content_hash" },
         "edit_decisions": { "$ref": "#/$defs/content_hash" },
         "props": { "$ref": "#/$defs/content_hash" }

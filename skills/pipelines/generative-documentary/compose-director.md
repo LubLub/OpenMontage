@@ -17,10 +17,15 @@ never substitute another runtime silently.
 When `render_runtime="remotion"` and `composition_mode="atelier"`, call
 `remotion_bundle` before `video_compose`. Pass the project directory plus the
 exact `proposal_packet`, `scene_plan`, `asset_manifest`, and `edit_decisions`
-artifacts. The bundle must succeed and validate before any proxy or full render.
-It freezes the Editorial Approval scope, canonical input hashes, project-local
-source and props, provenance-matched public assets, Remotion package lock, and
-render settings in `artifacts/remotion_bundle.json`.
+artifacts, plus the exact `editorial_package` named by the Asset Manifest's
+approval scope. The bundle must succeed and validate before any proxy or full
+render. It freezes the Editorial Approval scope, canonical input hashes,
+project-local source and props, provenance-matched public assets, Remotion
+package lock, and render settings in `artifacts/remotion_bundle.json`. Preserve
+the same receipt plus an immutable source, props, public-media, and runtime-lock
+snapshot by content hash under `artifacts/remotion-bundles/`; render settings
+and live-file verification come from that validated bundle, not from mutable
+caller arguments.
 
 Treat a bundle failure as a compose blocker. Do not copy an unmanifested file
 into the Remotion public directory, relax a hash, or substitute an asset to make

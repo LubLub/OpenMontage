@@ -42,18 +42,32 @@ ARTIFACT_NAMES = [
 ]
 
 
-def _validate_remotion_bundle_semantics(data: dict[str, Any]) -> None:
-    scope = {key: value for key, value in data.items() if key != "content_hash"}
+def canonical_hash(value: Any) -> str:
+    """Return the repository-wide canonical JSON content hash."""
     encoded = json.dumps(
-        scope,
+        value,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
+        allow_nan=False,
     ).encode("utf-8")
-    expected = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+    return f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+
+
+def _validate_remotion_bundle_semantics(data: dict[str, Any]) -> None:
+    scope = {key: value for key, value in data.items() if key != "content_hash"}
+    expected = canonical_hash(scope)
     if data.get("content_hash") != expected:
         raise jsonschema.ValidationError(
             "remotion_bundle content_hash does not match the canonical bundle scope"
+        )
+
+
+def _validate_editorial_package_semantics(data: dict[str, Any]) -> None:
+    scope = {key: value for key, value in data.items() if key != "content_hash"}
+    if data.get("content_hash") != canonical_hash(scope):
+        raise jsonschema.ValidationError(
+            "editorial_package content_hash does not match the canonical package scope"
         )
 
 
@@ -208,6 +222,8 @@ def validate_artifact(name: str, data: dict[str, Any]) -> None:
         _validate_technical_conformance_semantics(data)
     elif name == "release_package":
         _validate_release_package_semantics(data)
+    elif name == "editorial_package":
+        _validate_editorial_package_semantics(data)
     elif name == "remotion_bundle":
         _validate_remotion_bundle_semantics(data)
 

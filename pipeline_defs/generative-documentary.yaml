@@ -147,7 +147,7 @@ stages:
 
   - name: compose
     skill: pipelines/generative-documentary/compose-director
-    required_artifacts_in: [proposal_packet, scene_plan, edit_decisions, asset_manifest]
+    required_artifacts_in: [proposal_packet, scene_plan, editorial_package, edit_decisions, asset_manifest]
     optional_artifacts_in: [script]
     produces: [render_report, technical_conformance]
     required_tools: [video_compose, audio_mixer]
@@ -159,7 +159,7 @@ stages:
       - Runtime, resolution, duration, audio, and asset completeness are reported
     success_criteria:
       - Schema-valid render_report and passing technical_conformance
-      - When render_runtime is remotion and composition_mode is atelier, a schema-valid remotion_bundle binds the proposal, scene plan, Asset Manifest, edit decisions, props, source files, public assets, and runtime lock before render
+      - When render_runtime is remotion and composition_mode is atelier, a schema-valid remotion_bundle binds the proposal, scene plan, Editorial Package, Asset Manifest, edit decisions, props, source files, public assets, and runtime lock before render
 
   - name: publish
     skill: pipelines/generative-documentary/publish-director
