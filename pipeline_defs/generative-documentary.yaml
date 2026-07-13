@@ -115,8 +115,8 @@ stages:
     required_artifacts_in: [proposal_packet, script, scene_plan, editorial_package]
     produces: [asset_manifest]
     required_tools: [tts_selector, image_selector]
-    optional_tools: [video_selector, music_gen]
-    tools_available: [tts_selector, image_selector, video_selector, music_gen]
+    optional_tools: [video_selector, music_gen, documentary_local_asset, verified_asset_reuse]
+    tools_available: [tts_selector, image_selector, video_selector, music_gen, documentary_local_asset, verified_asset_reuse]
     checkpoint_required: true
     human_approval_default: false
     review_focus:
@@ -124,6 +124,7 @@ stages:
       - Generated reconstructions cannot be mistaken for historical evidence
       - Historical Anchors retain license or public-domain provenance metadata
       - Local motion is used for still treatments and generated video is limited to approved hero moments
+      - Source-bound local derivatives use the registered documentary local-asset tool, never an ad-hoc renderer
     success_criteria:
       - Schema-valid asset_manifest
       - Asset manifest uses the provenance-aware documentary profile and binds the approved Editorial Package scope
