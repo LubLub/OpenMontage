@@ -38,7 +38,23 @@ ARTIFACT_NAMES = [
     "final_review",
     "character_qa_report",
     "video_analysis_brief",
+    "remotion_bundle",
 ]
+
+
+def _validate_remotion_bundle_semantics(data: dict[str, Any]) -> None:
+    scope = {key: value for key, value in data.items() if key != "content_hash"}
+    encoded = json.dumps(
+        scope,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    expected = f"sha256:{hashlib.sha256(encoded).hexdigest()}"
+    if data.get("content_hash") != expected:
+        raise jsonschema.ValidationError(
+            "remotion_bundle content_hash does not match the canonical bundle scope"
+        )
 
 
 def _validate_claim_ledger_semantics(data: dict[str, Any]) -> None:
@@ -192,6 +208,8 @@ def validate_artifact(name: str, data: dict[str, Any]) -> None:
         _validate_technical_conformance_semantics(data)
     elif name == "release_package":
         _validate_release_package_semantics(data)
+    elif name == "remotion_bundle":
+        _validate_remotion_bundle_semantics(data)
 
 
 def list_schemas() -> list[str]:

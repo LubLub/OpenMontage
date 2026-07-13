@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/remotion_bundle",
+  "title": "Remotion Bundle",
+  "description": "Versioned, hash-bound inputs for one provenance-aware Remotion atelier render.",
+  "type": "object",
+  "required": [
+    "version",
+    "project_id",
+    "approval_scope",
+    "input_hashes",
+    "runtime_lock",
+    "art_direction",
+    "render_spec",
+    "source_files",
+    "public_assets",
+    "content_hash"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "approval_scope": {
+      "type": "object",
+      "required": ["package_id", "package_version", "content_hash"],
+      "properties": {
+        "package_id": { "type": "string", "minLength": 1 },
+        "package_version": { "type": "integer", "minimum": 1 },
+        "content_hash": { "$ref": "#/$defs/content_hash" }
+      },
+      "additionalProperties": false
+    },
+    "input_hashes": {
+      "type": "object",
+      "required": ["proposal_packet", "scene_plan", "asset_manifest", "edit_decisions", "props"],
+      "properties": {
+        "proposal_packet": { "$ref": "#/$defs/content_hash" },
+        "scene_plan": { "$ref": "#/$defs/content_hash" },
+        "asset_manifest": { "$ref": "#/$defs/content_hash" },
+        "edit_decisions": { "$ref": "#/$defs/content_hash" },
+        "props": { "$ref": "#/$defs/content_hash" }
+      },
+      "additionalProperties": false
+    },
+    "runtime_lock": {
+      "type": "object",
+      "required": ["remotion_version", "package_json_sha256", "package_lock_sha256"],
+      "properties": {
+        "remotion_version": { "type": "string", "minLength": 1 },
+        "package_json_sha256": { "$ref": "#/$defs/sha256" },
+        "package_lock_sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": false
+    },
+    "art_direction": { "type": "string", "minLength": 1 },
+    "render_spec": {
+      "type": "object",
+      "required": [
+        "render_runtime",
+        "composition_mode",
+        "composition_id",
+        "entry",
+        "props_path",
+        "public_dir",
+        "output_path"
+      ],
+      "properties": {
+        "render_runtime": { "type": "string", "const": "remotion" },
+        "composition_mode": { "type": "string", "const": "atelier" },
+        "composition_id": { "type": "string", "minLength": 1 },
+        "entry": { "$ref": "#/$defs/relative_path" },
+        "props_path": { "$ref": "#/$defs/relative_path" },
+        "public_dir": { "$ref": "#/$defs/relative_path" },
+        "output_path": { "$ref": "#/$defs/relative_path" },
+        "scale": { "type": "number", "minimum": 0.1, "maximum": 1.0 },
+        "crf": { "type": "integer", "minimum": 0, "maximum": 51 },
+        "concurrency": { "type": "integer", "minimum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "source_files": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/file_receipt" }
+    },
+    "public_assets": {
+      "type": "array",
+      "items": {
+        "allOf": [
+          { "$ref": "#/$defs/file_receipt" },
+          {
+            "type": "object",
+            "required": ["asset_id"],
+            "properties": { "asset_id": { "type": "string", "minLength": 1 } }
+          }
+        ]
+      }
+    },
+    "content_hash": { "$ref": "#/$defs/content_hash" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "content_hash": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "relative_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?![\\\\/])(?![A-Za-z]:[\\\\/])(?!.*(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)).+"
+    },
+    "file_receipt": {
+      "type": "object",
+      "required": ["path", "sha256"],
+      "properties": {
+        "path": { "$ref": "#/$defs/relative_path" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

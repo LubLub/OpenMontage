@@ -102,6 +102,22 @@ class VideoCompose(BaseTool):
                     "Used to resolve asset IDs in cuts[].source to file paths."
                 ),
             },
+            "project_dir": {
+                "type": "string",
+                "description": (
+                    "Episode Run project directory. Required for a "
+                    "generative-documentary Remotion atelier render so the "
+                    "versioned remotion_bundle can be built at render start."
+                ),
+            },
+            "scene_plan": {
+                "type": "object",
+                "description": (
+                    "Full scene_plan artifact. Required for a "
+                    "generative-documentary Remotion atelier render and bound "
+                    "into remotion_bundle."
+                ),
+            },
             "proposal_packet": {
                 "type": "object",
                 "description": (
@@ -1354,7 +1370,40 @@ class VideoCompose(BaseTool):
             or edit_decisions.get("renderer_family") == "bespoke"
         )
         if render_runtime == "remotion" and remotion_atelier_requested:
-            return self._render_via_atelier(inputs, edit_decisions)
+            proposal_plan = ((inputs.get("proposal_packet") or {}).get("production_plan") or {})
+            if proposal_plan.get("pipeline") == "generative-documentary":
+                from tools.video.remotion_bundle import RemotionBundle
+
+                bundle_result = RemotionBundle().execute(
+                    {
+                        "project_dir": inputs.get("project_dir"),
+                        "proposal_packet": inputs.get("proposal_packet"),
+                        "scene_plan": inputs.get("scene_plan"),
+                        "asset_manifest": asset_manifest,
+                        "edit_decisions": edit_decisions,
+                    }
+                )
+                if not bundle_result.success:
+                    return ToolResult(
+                        success=False,
+                        error=(
+                            "Remotion bundle validation failed before render: "
+                            f"{bundle_result.error}"
+                        ),
+                        data={"remotion_bundle": bundle_result.data},
+                    )
+                inputs = dict(inputs)
+                inputs["remotion_bundle"] = bundle_result.data["bundle"]
+                inputs["remotion_bundle_path"] = bundle_result.data["path"]
+            render_result = self._render_via_atelier(inputs, edit_decisions)
+            if inputs.get("remotion_bundle"):
+                data = dict(render_result.data or {})
+                data["remotion_bundle"] = {
+                    "path": inputs["remotion_bundle_path"],
+                    "content_hash": inputs["remotion_bundle"]["content_hash"],
+                }
+                render_result.data = data
+            return render_result
 
         if not asset_manifest:
             return ToolResult(success=False, error="asset_manifest required for render")

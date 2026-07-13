@@ -212,6 +212,23 @@ def test_manifest_carries_editorial_artifacts_to_the_existing_gate() -> None:
     assert "technical_conformance" in stages["publish"]["required_artifacts_in"]
 
 
+def test_compose_exposes_the_versioned_remotion_bundle_path() -> None:
+    manifest = load_pipeline("generative-documentary")
+    compose = next(stage for stage in manifest["stages"] if stage["name"] == "compose")
+
+    assert set(compose["required_artifacts_in"]) >= {
+        "proposal_packet",
+        "scene_plan",
+        "asset_manifest",
+        "edit_decisions",
+    }
+    assert "remotion_bundle" in compose["tools_available"]
+    assert any(
+        "remotion_bundle" in criterion
+        for criterion in compose["success_criteria"]
+    )
+
+
 def _premium_scene_plan() -> dict:
     return {
         "version": "1.0",
