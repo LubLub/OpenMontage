@@ -161,7 +161,7 @@ def _editorial_package() -> dict:
             "content_hash": f"sha256:{digest}",
         }
 
-    return {
+    package = {
         "version": "1.0",
         "package_id": "dry-run-editorial",
         "package_version": 1,
@@ -176,6 +176,17 @@ def _editorial_package() -> dict:
         "provider_plan": component("proposal_packet"),
         "expected_cost": {"currency": "USD", "amount": 0},
     }
+    scope = dict(package)
+    scope.pop("content_hash")
+    encoded = json.dumps(
+        scope,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    package["content_hash"] = "sha256:" + hashlib.sha256(encoded).hexdigest()
+    return package
 
 
 def test_manifest_has_exact_canonical_order_and_two_named_gates() -> None:
@@ -210,6 +221,24 @@ def test_manifest_carries_editorial_artifacts_to_the_existing_gate() -> None:
         "technical_conformance",
     ]
     assert "technical_conformance" in stages["publish"]["required_artifacts_in"]
+
+
+def test_compose_exposes_the_versioned_remotion_bundle_path() -> None:
+    manifest = load_pipeline("generative-documentary")
+    compose = next(stage for stage in manifest["stages"] if stage["name"] == "compose")
+
+    assert set(compose["required_artifacts_in"]) >= {
+        "proposal_packet",
+        "scene_plan",
+        "editorial_package",
+        "asset_manifest",
+        "edit_decisions",
+    }
+    assert "remotion_bundle" in compose["tools_available"]
+    assert any(
+        "remotion_bundle" in criterion
+        for criterion in compose["success_criteria"]
+    )
 
 
 def _premium_scene_plan() -> dict:
