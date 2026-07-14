@@ -247,6 +247,14 @@ class VerifiedAssetReuse(BaseTool):
                 manifest_document,
                 source_asset_id,
             )
+            media_type = inputs["media_type"]
+            source_media_type = source_asset.get("type")
+            if media_type not in MEDIA_TYPES or source_media_type not in MEDIA_TYPES:
+                raise ValueError("reuse media type is unsupported")
+            if media_type != source_media_type:
+                raise ValueError(
+                    "reuse media type does not match source manifest asset type"
+                )
             if (
                 source_asset.get("path") != inputs["source_path"]
                 or source_asset.get("sha256") != inputs["source_sha256"]
@@ -256,9 +264,6 @@ class VerifiedAssetReuse(BaseTool):
             expected_hash = inputs["source_sha256"]
             if _sha256(source) != expected_hash:
                 raise ValueError("reuse source hash changed")
-            media_type = inputs["media_type"]
-            if media_type not in MEDIA_TYPES:
-                raise ValueError("reuse media type is unsupported")
             output = _relative(project, inputs["output_path"], existing=False)
             output.parent.mkdir(parents=True, exist_ok=True)
             temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
