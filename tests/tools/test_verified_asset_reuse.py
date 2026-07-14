@@ -13,9 +13,26 @@ def _canonical_hash(value: object) -> str:
     return "sha256:" + hashlib.sha256(payload).hexdigest()
 
 
-def _write_source_evidence(project: Path, asset: dict) -> str:
+def _write_source_evidence(
+    project: Path,
+    asset: dict,
+    *,
+    provenance_aware: bool = True,
+) -> str:
     attempt_id = "trusted-assets-attempt"
-    artifacts = {"asset_manifest": {"version": "1.0", "assets": [asset]}}
+    manifest = {"version": "1.0", "assets": [asset]}
+    if provenance_aware:
+        manifest.update(
+            {
+                "profile": "provenance-aware-documentary-v1",
+                "approval_scope": {
+                    "package_id": "approved-source-package",
+                    "package_version": 1,
+                    "content_hash": "sha256:" + "a" * 64,
+                },
+            }
+        )
+    artifacts = {"asset_manifest": manifest}
     output_fingerprint = _canonical_hash(artifacts)
     file_receipt = {"path": asset["path"], "sha256": asset["sha256"]}
     checkpoint = {
@@ -91,6 +108,17 @@ def test_verified_asset_reuse_is_registered_and_hash_bound(tmp_path: Path) -> No
             "sha256": digest,
             "source_tool": "source-provider",
             "scene_id": "scene-1",
+            "provider": "source-provider",
+            "model": "source-model-v1",
+            "visual_type": "non_visual",
+            "reconstruction_status": "not_applicable",
+            "provenance": {
+                "origin": "licensed_source",
+                "provider": "source-provider",
+                "model": "source-model-v1",
+                "represented_as_archival": False,
+                "rights": {"license": {"name": "Test fixture license"}},
+            },
         },
     )
 
@@ -117,6 +145,100 @@ def test_verified_asset_reuse_is_registered_and_hash_bound(tmp_path: Path) -> No
     assert (target / result.data["path"]).read_bytes() == source.read_bytes()
 
 
+def test_verified_asset_reuse_accepts_canonical_kebab_case_project_id(
+    tmp_path: Path,
+) -> None:
+    projects = tmp_path / "projects"
+    source = projects / "sample-source/assets/audio/narration.wav"
+    target = projects / "sample-target"
+    source.parent.mkdir(parents=True)
+    target.mkdir(parents=True)
+    source.write_bytes(b"canonical-project-source")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest_digest = _write_source_evidence(
+        projects / "sample-source",
+        {
+            "id": "narration",
+            "type": "narration",
+            "path": "assets/audio/narration.wav",
+            "sha256": digest,
+            "source_tool": "source-provider",
+            "scene_id": "scene-1",
+            "provider": "source-provider",
+            "model": "source-model-v1",
+            "visual_type": "non_visual",
+            "reconstruction_status": "not_applicable",
+            "provenance": {
+                "origin": "licensed_source",
+                "provider": "source-provider",
+                "model": "source-model-v1",
+                "represented_as_archival": False,
+                "rights": {"license": {"name": "Test fixture license"}},
+            },
+        },
+    )
+
+    result = VerifiedAssetReuse().execute(
+        {
+            "project_dir": str(target),
+            "source_project_id": "sample-source",
+            "source_manifest_path": "checkpoint_assets.json",
+            "source_manifest_sha256": manifest_digest,
+            "source_asset_id": "narration",
+            "source_path": "assets/audio/narration.wav",
+            "source_sha256": digest,
+            "output_path": "assets/reused/narration.wav",
+            "media_type": "narration",
+        }
+    )
+
+    assert result.success is True
+    assert result.data["source_project_id"] == "sample-source"
+    assert (target / "assets/reused/narration.wav").read_bytes() == source.read_bytes()
+
+
+def test_verified_asset_reuse_rejects_source_without_provenance_profile(
+    tmp_path: Path,
+) -> None:
+    projects = tmp_path / "projects"
+    source = projects / "sample--source/assets/audio/narration.wav"
+    target = projects / "sample--target"
+    source.parent.mkdir(parents=True)
+    target.mkdir(parents=True)
+    source.write_bytes(b"unapproved-source")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest_digest = _write_source_evidence(
+        projects / "sample--source",
+        {
+            "id": "narration",
+            "type": "narration",
+            "path": "assets/audio/narration.wav",
+            "sha256": digest,
+            "source_tool": "source-provider",
+            "scene_id": "scene-1",
+        },
+        provenance_aware=False,
+    )
+
+    result = VerifiedAssetReuse().execute(
+        {
+            "project_dir": str(target),
+            "source_project_id": "sample--source",
+            "source_manifest_path": "checkpoint_assets.json",
+            "source_manifest_sha256": manifest_digest,
+            "source_asset_id": "narration",
+            "source_path": "assets/audio/narration.wav",
+            "source_sha256": digest,
+            "output_path": "assets/reused/narration.wav",
+            "media_type": "narration",
+        }
+    )
+
+    assert result.success is False
+    assert "provenance-aware" in result.error
+    assert not (target / "assets/reused/narration.wav").exists()
+
+
 def test_verified_asset_reuse_rejects_changed_source(tmp_path: Path) -> None:
     projects = tmp_path / "projects"
     source = projects / "sample--source/source.bin"
@@ -133,6 +255,21 @@ def test_verified_asset_reuse_rejects_changed_source(tmp_path: Path) -> None:
             "sha256": "0" * 64,
             "source_tool": "source-provider",
             "scene_id": "scene-1",
+            "provider": "source-provider",
+            "model": "source-model-v1",
+            "visual_type": "generated_reconstruction",
+            "reconstruction_status": "generated_reconstruction",
+            "provenance": {
+                "origin": "ai_generated",
+                "provider": "source-provider",
+                "model": "source-model-v1",
+                "prompt": "test fixture",
+                "represented_as_archival": False,
+            },
+            "motion": {
+                "mode": "generated_video",
+                "instructions": "Test fixture motion.",
+            },
         },
     )
 
@@ -152,3 +289,58 @@ def test_verified_asset_reuse_rejects_changed_source(tmp_path: Path) -> None:
 
     assert result.success is False
     assert not (target / "asset.bin").exists()
+
+
+def test_verified_asset_reuse_rejects_intermediate_output_symlink_without_writing(
+    tmp_path: Path,
+) -> None:
+    projects = tmp_path / "projects"
+    source = projects / "sample--source/assets/audio/narration.wav"
+    target = projects / "sample--target"
+    outside = tmp_path / "outside"
+    source.parent.mkdir(parents=True)
+    target.mkdir(parents=True)
+    outside.mkdir()
+    (target / "assets").symlink_to(outside, target_is_directory=True)
+    source.write_bytes(b"safe-source")
+    digest = hashlib.sha256(source.read_bytes()).hexdigest()
+    manifest_digest = _write_source_evidence(
+        projects / "sample--source",
+        {
+            "id": "narration",
+            "type": "narration",
+            "path": "assets/audio/narration.wav",
+            "sha256": digest,
+            "source_tool": "source-provider",
+            "scene_id": "scene-1",
+            "provider": "source-provider",
+            "model": "source-model-v1",
+            "visual_type": "non_visual",
+            "reconstruction_status": "not_applicable",
+            "provenance": {
+                "origin": "licensed_source",
+                "provider": "source-provider",
+                "model": "source-model-v1",
+                "represented_as_archival": False,
+                "rights": {"license": {"name": "Test fixture license"}},
+            },
+        },
+    )
+
+    result = VerifiedAssetReuse().execute(
+        {
+            "project_dir": str(target),
+            "source_project_id": "sample--source",
+            "source_manifest_path": "checkpoint_assets.json",
+            "source_manifest_sha256": manifest_digest,
+            "source_asset_id": "narration",
+            "source_path": "assets/audio/narration.wav",
+            "source_sha256": digest,
+            "output_path": "assets/reused/narration.wav",
+            "media_type": "narration",
+        }
+    )
+
+    assert result.success is False
+    assert "escapes its project" in result.error
+    assert not (outside / "reused").exists()

@@ -333,6 +333,31 @@ class TestSchemas:
             },
         )
 
+    @pytest.mark.parametrize(
+        "execution_mode",
+        ["deterministic-dry-run", "production"],
+    )
+    def test_cost_log_accepts_execution_mode(self, execution_mode):
+        validate_artifact(
+            "cost_log",
+            {
+                "version": "1.0",
+                "execution_mode": execution_mode,
+                "entries": [],
+            },
+        )
+
+    def test_cost_log_rejects_unknown_execution_mode(self):
+        with pytest.raises(Exception):
+            validate_artifact(
+                "cost_log",
+                {
+                    "version": "1.0",
+                    "execution_mode": "preview",
+                    "entries": [],
+                },
+            )
+
 
 # ---- Checkpoint ----
 

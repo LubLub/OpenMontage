@@ -24,7 +24,9 @@ from tools.base_tool import (
 )
 
 
-PROJECT_ID = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*--[a-z0-9]+(?:-[a-z0-9]+)*$")
+PROJECT_ID = re.compile(
+    r"^[a-z0-9]+(?:-[a-z0-9]+)*(?:--[a-z0-9]+(?:-[a-z0-9]+)*)?$"
+)
 MEDIA_TYPES = {"image", "video", "narration", "music"}
 
 
@@ -59,8 +61,7 @@ def _relative(root: Path, value: str, *, existing: bool) -> Path:
         if not resolved.is_file():
             raise ValueError("reuse source must be a regular file")
     else:
-        unresolved.parent.mkdir(parents=True, exist_ok=True)
-        parent = unresolved.parent.resolve(strict=True)
+        parent = unresolved.parent.resolve(strict=False)
         resolved = parent / unresolved.name
     if not resolved.is_relative_to(root):
         raise ValueError("reuse path escapes its project")
@@ -88,6 +89,13 @@ def _trusted_source_asset(
         validate_artifact("asset_manifest", manifest)
     except (FileNotFoundError, ValidationError) as exc:
         raise ValueError("reuse source manifest violates its contract") from exc
+    if (
+        manifest.get("profile") != "provenance-aware-documentary-v1"
+        or not isinstance(manifest.get("approval_scope"), dict)
+    ):
+        raise ValueError(
+            "reuse source manifest is not provenance-aware and approval-bound"
+        )
     attempt_id = checkpoint.get("attempt_id")
     if not isinstance(attempt_id, str) or not attempt_id:
         raise ValueError("reuse source checkpoint has no completed attempt")
@@ -252,6 +260,7 @@ class VerifiedAssetReuse(BaseTool):
             if media_type not in MEDIA_TYPES:
                 raise ValueError("reuse media type is unsupported")
             output = _relative(project, inputs["output_path"], existing=False)
+            output.parent.mkdir(parents=True, exist_ok=True)
             temporary = output.with_name(f".{output.name}.{uuid.uuid4().hex}.tmp")
             try:
                 shutil.copyfile(source, temporary)

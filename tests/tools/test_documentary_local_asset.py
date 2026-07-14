@@ -123,8 +123,32 @@ def test_dry_run_and_unsafe_paths_never_write(tmp_path: Path) -> None:
     assert dry.success is True
     assert dry.data["would_write"] == "assets/images/network.png"
     assert not (project / "assets/images/network.png").exists()
+    assert not (project / "assets").exists()
     assert escaped.success is False
     assert not (tmp_path / "escape.png").exists()
+
+
+def test_intermediate_output_symlink_is_rejected_without_writing(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    (project / "assets").symlink_to(outside, target_is_directory=True)
+
+    result = DocumentaryLocalAsset().execute(
+        {
+            "project_dir": str(project),
+            "operation": "network_diagram",
+            "output_path": "assets/images/network.png",
+            "recipe": {"width": 320, "height": 180, "seed": 30306},
+        }
+    )
+
+    assert result.success is False
+    assert "escapes the project" in result.error
+    assert not (outside / "images").exists()
 
 
 def test_source_reframe_rejects_symlinked_source(tmp_path: Path) -> None:
@@ -149,3 +173,29 @@ def test_source_reframe_rejects_symlinked_source(tmp_path: Path) -> None:
     assert result.success is False
     assert "safe regular file" in result.error
     assert not (project / "assets/images/output.png").exists()
+
+
+def test_source_reframe_rejects_its_source_as_output_before_execution(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    source = project / "assets/sources/source.png"
+    source.parent.mkdir(parents=True)
+    Image.new("RGB", (64, 48), (120, 90, 60)).save(source)
+    original = source.read_bytes()
+
+    result = DocumentaryLocalAsset().execute(
+        {
+            "project_dir": str(project),
+            "operation": "source_reframe",
+            "source_path": "assets/sources/source.png",
+            "source_sha256": _sha256(source),
+            "output_path": "assets/sources/source.png",
+            "recipe": {"width": 320, "height": 180},
+            "dry_run": True,
+        }
+    )
+
+    assert result.success is False
+    assert "distinct from its source" in result.error
+    assert source.read_bytes() == original

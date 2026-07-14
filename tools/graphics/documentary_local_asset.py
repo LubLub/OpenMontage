@@ -61,8 +61,7 @@ def _project_path(
             raise ValueError("asset source must be a safe regular file")
     else:
         parent = (project_dir / candidate).parent
-        parent.mkdir(parents=True, exist_ok=True)
-        resolved_parent = parent.resolve(strict=True)
+        resolved_parent = parent.resolve(strict=False)
         resolved = resolved_parent / candidate.name
         if resolved.exists() and resolved.is_symlink():
             raise ValueError("asset output cannot replace a symlink")
@@ -278,6 +277,10 @@ class DocumentaryLocalAsset(BaseTool):
                 source = _project_path(project_dir, source_relative, existing=True)
                 if _sha256(source) != expected_hash:
                     raise ValueError("documentary source hash changed")
+                if source == output:
+                    raise ValueError(
+                        "source_reframe output must be distinct from its source"
+                    )
             if inputs.get("dry_run") is True:
                 return ToolResult(
                     success=True,
@@ -290,6 +293,7 @@ class DocumentaryLocalAsset(BaseTool):
                     cost_usd=0.0,
                     model=self.version,
                 )
+            output.parent.mkdir(parents=True, exist_ok=True)
             if operation == "source_reframe":
                 assert source is not None
                 _write_png(output, _source_reframe(source, recipe))

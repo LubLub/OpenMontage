@@ -7,6 +7,10 @@
   "required": ["version", "entries"],
   "properties": {
     "version": { "type": "string", "const": "1.0" },
+    "execution_mode": {
+      "type": "string",
+      "enum": ["deterministic-dry-run", "production"]
+    },
     "budget_total_usd": { "type": "number", "minimum": 0 },
     "budget_reserved_usd": { "type": "number", "minimum": 0 },
     "budget_spent_usd": { "type": "number", "minimum": 0 },
